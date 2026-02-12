@@ -236,7 +236,7 @@ impl VoxCpm {
         Ok(crate::model::minicpm4::MiniCpmModel::new(cfg, vb)?)
     }
 
-    /// Load AudioVAE weights if `audiovae.safetensors` exists in the model directory.
+    /// Load AudioVAE weights if `audiovae.safetensors` (preferred) or `audiovae.pth` exists in the model directory.
     pub fn load_audiovae(&self) -> Result<Option<crate::model::audiovae::AudioVae>> {
         self.load_audiovae_with_prefix(None)
     }
@@ -548,9 +548,11 @@ impl VoxCpm {
         let stop_head = linear_no_bias(base_lm.cfg().hidden_size, 2, vb0.pp("stop_head"))?;
 
         // Audio VAE.
-        let audio_vae = self
-            .load_audiovae()?
-            .ok_or_else(|| VoxCpmError::InvalidArg("audiovae.safetensors not found".into()))?;
+        let audio_vae = self.load_audiovae()?.ok_or_else(|| {
+            VoxCpmError::InvalidArg(
+                "missing AudioVAE weights (audiovae.safetensors or audiovae.pth)".into(),
+            )
+        })?;
         let chunk_size = audio_vae.chunk_size();
         let sample_rate = audio_vae.cfg.sample_rate;
 
