@@ -1,12 +1,11 @@
 # Project Overview
 
-This repo re-implements VoxCPM inference in Rust on top of Candle (end-to-end TTS / voice cloning). It also keeps the upstream/reference Python implementation under `VoxCPM/` for parity, tooling, and validation (see `PLAN.md`).
+This repo re-implements VoxCPM inference in Rust on top of Candle (end-to-end TTS / voice cloning). 
 
 ## Repository Layout
 
 - `crates/voxcpm/`: Rust inference library (Candle). Public API: `crates/voxcpm/src/lib.rs`
 - `tools/`: helper scripts (e.g. convert PyTorch checkpoints to `.safetensors`)
-- `VoxCPM/`: upstream/reference Python package (CLI, Gradio demo, training scripts, docs)
 - `models/`, `parity_out/`, `*.wav`: local-only weights/fixtures/audio outputs, ignored by default in `.gitignore`
 
 ## Common Commands
