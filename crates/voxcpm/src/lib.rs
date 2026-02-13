@@ -332,8 +332,7 @@ impl VoxCpm {
         rt.residual_lm.setup_cache(1, rt.max_length)?;
 
         let total_len = text_token.dims2()?.1;
-        let pos: Vec<u32> = (0..total_len as u32).collect();
-        let pos = Tensor::from_vec(pos, (total_len,), &device)?;
+        let pos = Tensor::arange(0u32, total_len as u32, &device)?;
 
         // Prefill base LM cache.
         let (mut enc_outputs, kv_cache_tuple) =

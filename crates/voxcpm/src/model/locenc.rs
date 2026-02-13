@@ -47,8 +47,7 @@ impl VoxCpmLocEnc {
         // Flatten (B, T) into batch.
         let seq = p + 1;
         let x = x.reshape((b * t, seq, self.hidden))?;
-        let pos: Vec<u32> = (0..seq as u32).collect();
-        let pos = Tensor::from_vec(pos, (seq,), x.device())?;
+        let pos = Tensor::arange(0u32, seq as u32, x.device())?;
 
         // Non-causal transformer.
         let h = self.encoder.forward(&x, &pos, false)?; // [B*T, seq, hidden]

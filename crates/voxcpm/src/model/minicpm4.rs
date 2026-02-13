@@ -117,16 +117,13 @@ impl RotaryLongRope {
         let inv_ext = ext_factors.recip()?; // [half]
 
         // inv_freq = 1.0 / (base ** (arange(0, dim, 2) / dim))
-        let inv_freq: Vec<f32> = (0..half)
-            .map(|i| {
-                let power = (2.0 * (i as f64)) / (head_dim as f64);
-                (1.0 / cfg.rope_theta.powf(power)) as f32
-            })
-            .collect();
-        let inv_freq = Tensor::from_vec(inv_freq, (half,), device)?;
+        // Keep this aligned with the Python reference (device-side arange semantics).
+        let inv_freq_i = Tensor::arange(0f32, half as f32, device)?; // [half]
+        let power = ((&inv_freq_i * 2f64)? / (head_dim as f64))?; // [half]
+        let inv_freq = (&power * (-(cfg.rope_theta as f64).ln()))?.exp()?; // [half]
 
-        let t: Vec<f32> = (0..max_len).map(|i| i as f32).collect();
-        let t = Tensor::from_vec(t, (max_len, 1), device)?; // [max_len, 1]
+        // t = arange(max_len)
+        let t = Tensor::arange(0f32, max_len as f32, device)?.reshape((max_len, 1))?; // [max_len, 1]
 
         // freqs = outer(t, 1/ext_factors) * inv_freq
         let outer = t.broadcast_mul(&inv_ext.reshape((1, half))?)?; // [max_len, half]
@@ -156,14 +153,7 @@ impl RotaryLongRope {
         let ids_u32 = position_ids.to_dtype(DType::U32)?;
         let flat = ids_u32.flatten_all()?;
 
-        let flat_vec = flat.to_vec1::<u32>()?;
-        let max_pos = flat_vec.iter().copied().max().unwrap_or(0) as usize;
-        if max_pos >= self.max_len {
-            candle_core::bail!(
-                "position_id {max_pos} exceeds rope cache max_len {}",
-                self.max_len
-            )
-        }
+        // Python does not sync to host for bounds checks; indexing will error if out-of-range.
         let cos = self.cos_cached.index_select(&flat, 0)?;
         let sin = self.sin_cached.index_select(&flat, 0)?;
 
@@ -877,8 +867,7 @@ mod tests {
         let bs = 1usize;
         let seq = 4usize;
         let xs = Tensor::randn(0f32, 1f32, (bs, seq, 16), &dev)?;
-        let pos: Vec<u32> = (0..seq as u32).collect();
-        let pos = Tensor::from_vec(pos, (seq,), &dev)?;
+        let pos = Tensor::arange(0u32, seq as u32, &dev)?;
 
         let (_h, caches) = model.forward_with_cache(&xs, &pos, true)?;
 
@@ -890,8 +879,7 @@ mod tests {
         // Next token.
         let x_next = Tensor::randn(0f32, 1f32, (bs, 1, 16), &dev)?;
         let full = Tensor::cat(&[&xs, &x_next], D::Minus2)?;
-        let pos2: Vec<u32> = (0..(seq as u32 + 1)).collect();
-        let pos2 = Tensor::from_vec(pos2, (seq + 1,), &dev)?;
+        let pos2 = Tensor::arange(0u32, (seq as u32 + 1), &dev)?;
         let h_full = model.forward(&full, &pos2, true)?;
         let h_full_last = h_full.narrow(1, seq, 1)?;
 

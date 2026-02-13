@@ -173,8 +173,7 @@ impl VoxCpmLocDiT {
         let seq = Tensor::cat(&[&cls, &cond_tok, &x_tok], D::Minus2)?; // concat on seq dim
 
         let seq_len = 1 + prefix + t_len;
-        let pos: Vec<u32> = (0..seq_len as u32).collect();
-        let pos = Tensor::from_vec(pos, (seq_len,), x.device())?;
+        let pos = Tensor::arange(0u32, seq_len as u32, x.device())?;
         let hidden = self.decoder.forward(&seq, &pos, false)?; // [N, seq, H]
         let hidden = hidden.narrow(1, prefix + 1, t_len)?; // [N, T, H]
 
