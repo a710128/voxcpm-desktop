@@ -2,6 +2,7 @@
 //!
 //! Reference: `VoxCPM/src/voxcpm/modules/locdit/local_dit.py`.
 
+use crate::arange_cache;
 use crate::model::minicpm4::{MiniCpmConfig, MiniCpmModel};
 use crate::model::unified_cfm::VelocityEstimator;
 use candle_core::{DType, Result, Tensor, D};
@@ -36,7 +37,7 @@ impl SinusoidalPosEmb {
         // Matches the Python implementation:
         // emb = exp(arange(half_dim) * -(log(10000)/(half_dim-1)))
         let step = -((10000f64).ln() / ((half - 1) as f64));
-        let arange = Tensor::arange(0f32, half as f32, x.device())?; // [half]
+        let arange = arange_cache::arange_f32(half, x.device())?; // [half]
         let freqs = arange.affine(step, 0.0)?.exp()?; // [half]
 
         let x = x.to_dtype(DType::F32)?;
@@ -171,7 +172,7 @@ impl VoxCpmLocDiT {
         let seq = Tensor::cat(&[&cls, &cond_tok, &x_tok], D::Minus2)?; // concat on seq dim
 
         let seq_len = 1 + prefix + t_len;
-        let pos = Tensor::arange(0u32, seq_len as u32, x.device())?;
+        let pos = arange_cache::arange_u32(seq_len, x.device())?;
         let hidden = self.decoder.forward(&seq, &pos, false)?; // [N, seq, H]
         let hidden = hidden.narrow(1, prefix + 1, t_len)?; // [N, T, H]
 

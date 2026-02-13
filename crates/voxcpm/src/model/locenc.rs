@@ -2,6 +2,7 @@
 //!
 //! Reference: `VoxCPM/src/voxcpm/modules/locenc/local_encoder.py`.
 
+use crate::arange_cache;
 use crate::model::minicpm4::{MiniCpmConfig, MiniCpmModel};
 use candle_core::{Result, Tensor, D};
 use candle_nn::{Linear, Module, VarBuilder};
@@ -47,7 +48,7 @@ impl VoxCpmLocEnc {
         // Flatten (B, T) into batch.
         let seq = p + 1;
         let x = x.reshape((b * t, seq, self.hidden))?;
-        let pos = Tensor::arange(0u32, seq as u32, x.device())?;
+        let pos = arange_cache::arange_u32(seq, x.device())?;
 
         // Non-causal transformer.
         let h = self.encoder.forward(&x, &pos, false)?; // [B*T, seq, hidden]

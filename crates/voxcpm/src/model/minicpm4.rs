@@ -4,6 +4,7 @@
 //! - RMSNorm computes variance in f32 then casts back.
 //! - RoPE applies on q/k in f32 then casts back.
 
+use crate::arange_cache;
 use crate::model::cache::StaticKvCache;
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{linear_no_bias, ops, Embedding, Linear, Module, VarBuilder};
@@ -118,12 +119,12 @@ impl RotaryLongRope {
 
         // inv_freq = 1.0 / (base ** (arange(0, dim, 2) / dim))
         // Keep this aligned with the Python reference (device-side arange semantics).
-        let inv_freq_i = Tensor::arange(0f32, half as f32, device)?; // [half]
+        let inv_freq_i = arange_cache::arange_f32(half, device)?; // [half]
         let power = ((&inv_freq_i * 2f64)? / (head_dim as f64))?; // [half]
         let inv_freq = (&power * (-(cfg.rope_theta as f64).ln()))?.exp()?; // [half]
 
         // t = arange(max_len)
-        let t = Tensor::arange(0f32, max_len as f32, device)?.reshape((max_len, 1))?; // [max_len, 1]
+        let t = arange_cache::arange_f32(max_len, device)?.reshape((max_len, 1))?; // [max_len, 1]
 
         // freqs = outer(t, 1/ext_factors) * inv_freq
         let outer = t.broadcast_mul(&inv_ext.reshape((1, half))?)?; // [max_len, half]
@@ -461,7 +462,7 @@ impl MiniCpmAttention {
                 // allow = arange <= position_id  (per batch)
                 // mask = log(allow)
                 let max_len = self.cache_max_len;
-                let arange = Tensor::arange(0u32, max_len as u32, x.device())?
+                let arange = arange_cache::arange_u32(max_len, x.device())?
                     .reshape((1, max_len))?
                     .broadcast_as((bs, max_len))?;
                 let pos_u32 = position_id
@@ -914,7 +915,7 @@ mod tests {
         let bs = 1usize;
         let seq = 4usize;
         let xs = Tensor::randn(0f32, 1f32, (bs, seq, 16), &dev)?;
-        let pos = Tensor::arange(0u32, seq as u32, &dev)?;
+        let pos = arange_cache::arange_u32(seq, &dev)?;
 
         let (_h, caches) = model.forward_with_cache(&xs, &pos, true)?;
 
@@ -926,7 +927,7 @@ mod tests {
         // Next token.
         let x_next = Tensor::randn(0f32, 1f32, (bs, 1, 16), &dev)?;
         let full = Tensor::cat(&[&xs, &x_next], D::Minus2)?;
-        let pos2 = Tensor::arange(0u32, seq as u32 + 1, &dev)?;
+        let pos2 = arange_cache::arange_u32(seq + 1, &dev)?;
         let h_full = model.forward(&full, &pos2, true)?;
         let h_full_last = h_full.narrow(1, seq, 1)?;
 

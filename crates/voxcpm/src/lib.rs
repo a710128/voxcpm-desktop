@@ -3,6 +3,7 @@
 //! This crate is implemented incrementally: first load config/tokenizer/weights
 //! (Milestone 1), then add model execution (next milestones).
 
+mod arange_cache;
 mod audio;
 mod config;
 mod error;
@@ -332,7 +333,7 @@ impl VoxCpm {
         rt.residual_lm.setup_cache(1, rt.max_length)?;
 
         let total_len = text_token.dims2()?.1;
-        let pos = Tensor::arange(0u32, total_len as u32, &device)?;
+        let pos = arange_cache::arange_u32(total_len, &device)?;
 
         // Prefill base LM cache.
         let (mut enc_outputs, kv_cache_tuple) =
@@ -476,6 +477,10 @@ impl VoxCpm {
         let patch_size = self.config.patch_size().unwrap_or(2);
         let feat_dim = self.config.feat_dim().unwrap_or(64);
         let max_length = self.config.max_length();
+
+        // Warm cached arange tensors once per init-thread.
+        // This avoids repeated host->device uploads for common dynamic position-id tensors.
+        arange_cache::warm_u32(max_length, &self.device)?;
 
         // Base LM: either at root or under `base_lm.`.
         let vb_base = if vb0.contains_tensor("embed_tokens.weight") {
