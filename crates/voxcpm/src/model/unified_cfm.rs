@@ -2,6 +2,7 @@
 //!
 //! Reference: `VoxCPM/src/voxcpm/modules/locdit/unified_cfm.py`.
 
+use crate::arange_cache;
 use candle_core::{DType, Device, Result, Tensor};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -142,8 +143,9 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
         let z = self.randn_tensor((b, self.in_channels, patch_size), dev, seed, dtype)?;
         let z = (&z * temperature)?;
 
-        let t_span = build_t_span(n_timesteps, sway_sampling_coef);
-        let t_span = Tensor::from_vec(t_span, (n_timesteps + 1,), dev)?;
+        // Build the reference t_span purely with device ops (linspace + sway warp).
+        // We intentionally do NOT cache it here (per caller preference).
+        let t_span = t_span_device(n_timesteps, sway_sampling_coef, dev)?;
         self.solve_euler(&z, &t_span, mu, cond, cfg_value, use_cfg_zero_star)
     }
 
@@ -160,7 +162,13 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
         cfg_value: f64,
         use_cfg_zero_star: bool,
     ) -> Result<Tensor> {
-        let t_span = t_span.to_dtype(DType::F32)?;
+        // The upstream builds t_span in the model dtype; we use f32 for stability.
+        // `t_span_device` returns f32, but allow callers to pass other dtypes.
+        let t_span = if t_span.dtype() == DType::F32 {
+            t_span.clone()
+        } else {
+            t_span.to_dtype(DType::F32)?
+        };
         let n_steps = t_span.dims1()?;
         if n_steps < 2 {
             candle_core::bail!("t_span must have len>=2")
@@ -235,6 +243,26 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
 
         Ok(cur)
     }
+}
+
+fn t_span_device(n_timesteps: usize, sway_sampling_coef: f64, device: &Device) -> Result<Tensor> {
+    // Reference:
+    // t_span = linspace(1, 0, n_timesteps+1)
+    // t_span = t_span + sway * (cos(pi/2 * t_span) - 1 + t_span)
+    let steps = n_timesteps + 1;
+    let t = if n_timesteps == 0 {
+        Tensor::ones((1usize,), DType::F32, device)?
+    } else {
+        // t[i] = 1 - i/n_timesteps
+        let idx = arange_cache::arange_f32(steps, device)?; // [steps]
+        let inv_n = 1f64 / (n_timesteps as f64);
+        idx.affine(-inv_n, 1.0)?
+    };
+
+    let half_pi = std::f64::consts::PI / 2.0;
+    let warp = ((&t * half_pi)?.cos()? - 1f64)?;
+    let warp = (warp + &t)?;
+    &t + (&warp * sway_sampling_coef)?
 }
 
 pub fn build_t_span(n_timesteps: usize, sway_sampling_coef: f64) -> Vec<f32> {
