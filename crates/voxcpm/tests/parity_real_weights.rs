@@ -505,16 +505,13 @@ fn parity_cfm_solve_euler() -> Result<()> {
     let cond = ts.get("input/cond").unwrap();
     let y_ref = ts.get("expected/y").unwrap();
 
-    let t_span_v = t_span
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
+    let t_span = t_span.to_dtype(DType::F32)?;
 
     let vb = model_vb(&paths, DType::F32, &dev)?;
     let estimator =
         model::locdit::VoxCpmLocDiT::new(dit_cfg, feat_dim, vb.pp("feat_decoder").pp("estimator"))?;
     let cfm = model::unified_cfm::UnifiedCfm::new(feat_dim, estimator, false);
-    let y = cfm.solve_euler(x0, &t_span_v, mu, cond, cfg_value, use_zero_star)?;
+    let y = cfm.solve_euler(x0, &t_span, mu, cond, cfg_value, use_zero_star)?;
     allclose(&y, y_ref, atol, rtol)
 }
 

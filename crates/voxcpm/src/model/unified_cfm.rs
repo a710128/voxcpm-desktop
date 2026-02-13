@@ -143,6 +143,7 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
         let z = (&z * temperature)?;
 
         let t_span = build_t_span(n_timesteps, sway_sampling_coef);
+        let t_span = Tensor::from_vec(t_span, (n_timesteps + 1,), dev)?;
         self.solve_euler(&z, &t_span, mu, cond, cfg_value, use_cfg_zero_star)
     }
 
@@ -153,13 +154,15 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
     pub fn solve_euler(
         &self,
         x: &Tensor,
-        t_span: &[f32],
+        t_span: &Tensor,
         mu: &Tensor,
         cond: &Tensor,
         cfg_value: f64,
         use_cfg_zero_star: bool,
     ) -> Result<Tensor> {
-        if t_span.len() < 2 {
+        let t_span = t_span.to_dtype(DType::F32)?;
+        let n_steps = t_span.dims1()?;
+        if n_steps < 2 {
             candle_core::bail!("t_span must have len>=2")
         }
         let (b, c, t) = x.dims3()?;
@@ -180,13 +183,14 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
             )
         }
 
-        let zero_init_steps = ((t_span.len() as f32) * 0.04).floor() as usize;
+        let zero_init_steps = ((n_steps as f32) * 0.04).floor() as usize;
         let zero_init_steps = zero_init_steps.max(1);
 
         let mut cur = x.clone();
-        for step in 1..t_span.len() {
-            let t_cur = t_span[step - 1] as f64;
-            let dt = (t_span[step - 1] - t_span[step]) as f64;
+        for step in 1..n_steps {
+            let t_prev = t_span.narrow(0, step - 1, 1)?; // [1]
+            let t_next = t_span.narrow(0, step, 1)?; // [1]
+            let dt_f32 = (&t_prev - &t_next)?; // [1]
 
             let dphi_dt = if use_cfg_zero_star && step <= zero_init_steps {
                 Tensor::zeros_like(&cur)?
@@ -195,9 +199,9 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
                 let zeros_mu = Tensor::zeros_like(mu)?;
                 let mu_in = Tensor::cat(&[mu, &zeros_mu], 0)?; // [2B, H]
 
-                let t_in = Tensor::from_vec(vec![t_cur as f32; 2 * b], (2 * b,), cur.device())?;
+                let t_in = t_prev.broadcast_as((2 * b,))?;
                 let dt_in = if self.mean_mode {
-                    Tensor::from_vec(vec![dt as f32; 2 * b], (2 * b,), cur.device())?
+                    dt_f32.broadcast_as((2 * b,))?
                 } else {
                     Tensor::zeros((2 * b,), DType::F32, cur.device())?
                 };
@@ -223,7 +227,10 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
                 (neg_scaled + (&diff * cfg_value)?)?
             };
 
-            cur = (&cur - (&dphi_dt * dt)?)?;
+            // dt is scalar ([1]) and must match dtype for the update.
+            let dt = dt_f32.to_dtype(cur.dtype())?.reshape((1, 1, 1))?;
+            let delta = dphi_dt.broadcast_mul(&dt)?;
+            cur = (&cur - &delta)?;
         }
 
         Ok(cur)
@@ -299,7 +306,7 @@ mod tests {
         let cond = Tensor::zeros((b, c, t), DType::F32, &dev)?;
 
         let n_steps = 10usize;
-        let t_span = build_t_span(n_steps, 0.0);
+        let t_span = Tensor::from_vec(build_t_span(n_steps, 0.0), (n_steps + 1,), &dev)?;
         let out = cfm.solve_euler(&x0, &t_span, &mu, &cond, 1.0, false)?;
 
         // With v=x and constant dt=1/n, Euler gives x_n = (1-1/n)^n x0.
@@ -325,7 +332,7 @@ mod tests {
         let mu = Tensor::zeros((b, 4), DType::F32, &dev)?;
         let cond = Tensor::zeros((b, c, t), DType::F32, &dev)?;
 
-        let t_span = vec![1.0f32, 0.0f32]; // single Euler step, dt=1
+        let t_span = Tensor::from_vec(vec![1.0f32, 0.0f32], (2,), &dev)?; // single Euler step, dt=1
         let cfg = 2.5f64;
         let out = cfm.solve_euler(&x0, &t_span, &mu, &cond, cfg, false)?;
 

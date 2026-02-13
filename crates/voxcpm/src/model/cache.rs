@@ -32,6 +32,50 @@ impl StaticKvCache {
         Ok(())
     }
 
+    /// Set per-batch positions using an index tensor (device-side).
+    ///
+    /// `position_id` must have shape `[bs]` or `[bs, 1]` and integer dtype.
+    /// `k/v` must have shape `[bs, kv_heads, 1, head_dim]`.
+    ///
+    /// This avoids any device->host sync by using `scatter_set` along the
+    /// sequence dimension (D::Minus2).
+    pub fn set_at(&mut self, position_id: &Tensor, k: &Tensor, v: &Tensor) -> Result<()> {
+        let (bs, kvh, _max_len, hd) = self.k.dims4()?;
+        let k = k.contiguous()?;
+        let v = v.contiguous()?;
+        if k.dims4()? != (bs, kvh, 1, hd) {
+            candle_core::bail!(
+                "k dims mismatch: expected [bs={bs}, kvh={kvh}, 1, hd={hd}], got {:?}",
+                k.dims()
+            )
+        }
+        if v.dims4()? != (bs, kvh, 1, hd) {
+            candle_core::bail!(
+                "v dims mismatch: expected [bs={bs}, kvh={kvh}, 1, hd={hd}], got {:?}",
+                v.dims()
+            )
+        }
+
+        let pos = match position_id.dims() {
+            [b] if *b == bs => position_id.reshape((bs, 1))?,
+            [b, s] if *b == bs && *s == 1 => position_id.clone(),
+            ds => candle_core::bail!("position_id must have shape [bs] or [bs,1], got {ds:?}"),
+        };
+        // scatter_set expects integer indexes; use U32 consistently.
+        let pos_u32 = pos.to_dtype(DType::U32)?;
+        // Broadcast to match source shape [bs, kvh, 1, hd].
+        // scatter_set requires the index tensor to be contiguous on CUDA/Metal.
+        let idx = pos_u32
+            .reshape((bs, 1, 1, 1))?
+            .broadcast_as((bs, kvh, 1, hd))?
+            .contiguous()?;
+
+        // In-place update (not compatible with backprop; fine for inference cache).
+        self.k.scatter_set(&idx, &k, D::Minus2)?;
+        self.v.scatter_set(&idx, &v, D::Minus2)?;
+        Ok(())
+    }
+
     /// Returns a slice of cached k/v up to and including `pos`.
     pub fn slice(&self, pos: usize) -> Result<(Tensor, Tensor)> {
         let len = pos + 1;
@@ -72,6 +116,29 @@ impl StaticKvCache {
         self.clear()?;
         self.k.slice_set(k, D::Minus2, 0)?;
         self.v.slice_set(v, D::Minus2, 0)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_kv_cache_set_at_cpu_smoke() -> Result<()> {
+        let dev = Device::Cpu;
+        let bs = 2usize;
+        let kvh = 3usize;
+        let max_len = 5usize;
+        let hd = 4usize;
+
+        let mut cache = StaticKvCache::new(&dev, DType::F32, bs, kvh, max_len, hd)?;
+        // Per-batch positions.
+        let pos = Tensor::from_vec(vec![1u32, 3u32], (bs,), &dev)?;
+
+        let k = Tensor::randn(0f32, 1f32, (bs, kvh, 1, hd), &dev)?;
+        let v = Tensor::randn(0f32, 1f32, (bs, kvh, 1, hd), &dev)?;
+        cache.set_at(&pos, &k, &v)?;
         Ok(())
     }
 }

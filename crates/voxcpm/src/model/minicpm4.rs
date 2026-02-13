@@ -387,13 +387,6 @@ impl MiniCpmAttention {
             [b, s] if *b == bs && *s == 1 => position_id.clone(),
             ds => candle_core::bail!("position_id must have shape [bs] or [bs,1], got {ds:?}"),
         };
-        let pos = position_id.flatten_all()?.to_vec1::<u32>()?[0] as usize;
-        if pos >= self.cache_max_len {
-            candle_core::bail!(
-                "position_id {pos} out of cache range (max_len={})",
-                self.cache_max_len
-            )
-        }
 
         let q = self.q_proj.forward(x)?; // [bs, 1, h*hd]
         let k = self.k_proj.forward(x)?;
@@ -412,6 +405,11 @@ impl MiniCpmAttention {
         let (cos, sin) = self.rope.get_cos_sin(&position_id)?;
         let (q, k) = apply_rope(&q, &k, &cos, &sin)?;
 
+        // Python reference calls contiguous() before SDPA.
+        let q = q.contiguous()?;
+        let k = k.contiguous()?;
+        let v = v.contiguous()?;
+
         if self.cache.is_none() {
             self.cache = Some(StaticKvCache::new(
                 &self.device,
@@ -423,18 +421,66 @@ impl MiniCpmAttention {
             )?);
         }
         let cache = self.cache.as_mut().unwrap();
-        cache.set(pos, &k.contiguous()?, &v.contiguous()?)?;
-        let (k_all, v_all) = cache.slice(pos)?; // [bs, kvh, t, hd]
-
         let repeat = self.num_heads / self.num_kv_heads;
-        let k_all = repeat_kv(&k_all, repeat)?;
-        let v_all = repeat_kv(&v_all, repeat)?;
 
-        // Attention over [0..pos+1] without explicit masking.
-        let k_t = k_all.transpose(D::Minus2, D::Minus1)?; // [bs, h, hd, t]
-        let scores = (q.matmul(&k_t)? / (self.head_dim as f64).sqrt())?; // [bs, h, 1, t]
-        let attn = ops::softmax(&scores, D::Minus1)?;
-        let out = attn.matmul(&v_all)?; // [bs, h, 1, hd]
+        let out = match x.device() {
+            Device::Cpu => {
+                // CPU path keeps the existing behavior (host position read + cache slicing).
+                let pos = position_id.flatten_all()?.to_vec1::<u32>()?[0] as usize;
+                if pos >= self.cache_max_len {
+                    candle_core::bail!(
+                        "position_id {pos} out of cache range (max_len={})",
+                        self.cache_max_len
+                    )
+                }
+                cache.set(pos, &k, &v)?;
+                let (k_all, v_all) = cache.slice(pos)?; // [bs, kvh, t, hd]
+
+                let k_all = repeat_kv(&k_all, repeat)?;
+                let v_all = repeat_kv(&v_all, repeat)?;
+
+                // Attention over [0..pos+1] without explicit masking.
+                let k_t = k_all.transpose(D::Minus2, D::Minus1)?; // [bs, h, hd, t]
+                let scores = (q.matmul(&k_t)? / (self.head_dim as f64).sqrt())?; // [bs, h, 1, t]
+                let attn = ops::softmax(&scores, D::Minus1)?;
+                attn.matmul(&v_all)? // [bs, h, 1, hd]
+            }
+            Device::Cuda(_) | Device::Metal(_) => {
+                // GPU path avoids device->host sync by:
+                // - writing the cache with scatter_set (per-batch indices)
+                // - using a device-side mask over the full cache tensors
+                cache.set_at(&position_id, &k, &v)?;
+
+                let k_all = repeat_kv(&cache.k, repeat)?; // [bs, h, max_len, hd]
+                let v_all = repeat_kv(&cache.v, repeat)?;
+
+                let k_t = k_all.transpose(D::Minus2, D::Minus1)?; // [bs, h, hd, max_len]
+                let scores = (q.matmul(&k_t)? / (self.head_dim as f64).sqrt())?; // [bs, h, 1, max_len]
+
+                // Build the PyTorch-style additive mask:
+                // allow = arange <= position_id  (per batch)
+                // mask = log(allow)
+                let max_len = self.cache_max_len;
+                let arange = Tensor::arange(0u32, max_len as u32, x.device())?
+                    .reshape((1, max_len))?
+                    .broadcast_as((bs, max_len))?;
+                let pos_u32 = position_id
+                    .to_dtype(DType::U32)?
+                    .broadcast_as((bs, max_len))?;
+                let allow = arange.le(&pos_u32)?; // u8
+                let mask = allow
+                    .to_dtype(DType::F32)?
+                    .log()?
+                    .to_dtype(scores.dtype())?
+                    .unsqueeze(1)?
+                    .unsqueeze(1)?; // [bs, 1, 1, max_len]
+                let scores = scores.broadcast_add(&mask)?;
+
+                let attn = ops::softmax(&scores, D::Minus1)?;
+                attn.matmul(&v_all)? // [bs, h, 1, hd]
+            }
+        };
+
         let out = out
             .transpose(1, 2)?
             .reshape((bs, 1, self.num_heads * self.head_dim))?;
@@ -721,7 +767,8 @@ impl MiniCpmModel {
             candle_core::bail!("forward_step_cached expects seq==1, got {seq}")
         }
         let pos = self.step()?;
-        let pos_ids = Tensor::from_vec(vec![pos; bs], (bs,), x_embed.device())?;
+        // Create the position ids directly on-device.
+        let pos_ids = Tensor::full(pos, (bs,), x_embed.device())?;
         self.forward_step(x_embed, &pos_ids)
     }
 
@@ -879,7 +926,7 @@ mod tests {
         // Next token.
         let x_next = Tensor::randn(0f32, 1f32, (bs, 1, 16), &dev)?;
         let full = Tensor::cat(&[&xs, &x_next], D::Minus2)?;
-        let pos2 = Tensor::arange(0u32, (seq as u32 + 1), &dev)?;
+        let pos2 = Tensor::arange(0u32, seq as u32 + 1, &dev)?;
         let h_full = model.forward(&full, &pos2, true)?;
         let h_full_last = h_full.narrow(1, seq, 1)?;
 

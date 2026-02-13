@@ -36,10 +36,8 @@ impl SinusoidalPosEmb {
         // Matches the Python implementation:
         // emb = exp(arange(half_dim) * -(log(10000)/(half_dim-1)))
         let step = -((10000f64).ln() / ((half - 1) as f64));
-        let freqs: Vec<f32> = (0..half)
-            .map(|i| ((i as f64) * step).exp() as f32)
-            .collect();
-        let freqs = Tensor::from_vec(freqs, (half,), x.device())?; // [half]
+        let arange = Tensor::arange(0f32, half as f32, x.device())?; // [half]
+        let freqs = arange.affine(step, 0.0)?.exp()?; // [half]
 
         let x = x.to_dtype(DType::F32)?;
         let x = (&x * self.scale)?; // [N]
