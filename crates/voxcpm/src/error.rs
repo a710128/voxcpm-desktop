@@ -7,6 +7,9 @@ pub enum VoxCpmError {
     Unimplemented(&'static str),
     /// Invalid user input.
     InvalidArg(String),
+
+    /// Generation was cancelled by the caller.
+    Cancelled,
     /// IO error.
     Io(std::io::Error),
 
@@ -31,6 +34,7 @@ impl fmt::Display for VoxCpmError {
         match self {
             Self::Unimplemented(what) => write!(f, "{what} is not implemented"),
             Self::InvalidArg(msg) => write!(f, "invalid argument: {msg}"),
+            Self::Cancelled => write!(f, "cancelled"),
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::Json(err) => write!(f, "json error: {err}"),
             Self::Tokenizer(err) => write!(f, "tokenizer error: {err}"),

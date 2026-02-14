@@ -1,0 +1,16 @@
+[package]
+name = "voxcpm_engine_sdk"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+tauri-shell = ["dep:tauri", "dep:tauri-plugin-shell"]
+
+[dependencies]
+bytes = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "process", "time"] }
+thiserror = "2"
+voxcpm_ipc = { path = "../voxcpm_ipc" }
+
+tauri = { version = "2", optional = true }
+tauri-plugin-shell = { version = "2", optional = true }

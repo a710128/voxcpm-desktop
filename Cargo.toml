@@ -2,6 +2,17 @@
 resolver = "2"
 members = [
     "crates/voxcpm",
+    "crates/voxcpm_ipc",
+    "crates/voxcpm_engine",
+    "crates/voxcpm_engine_sdk",
+]
+
+exclude = [
+    "crates/voxcpm_desktop/src-tauri",
+]
+
+default-members = [
+    "crates/voxcpm",
 ]
 
 [patch.crates-io]

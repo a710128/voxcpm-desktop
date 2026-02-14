@@ -1,0 +1,22 @@
+[package]
+name = "voxcpm_engine"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "engine"
+path = "src/main.rs"
+
+[features]
+cuda = ["voxcpm/cuda"]
+metal = ["voxcpm/metal", "candle-core/metal"]
+
+[dependencies]
+bytes = "1"
+candle-core = "0.9"
+futures-util = "0.3"
+hound = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "time", "fs", "io-std"] }
+voxcpm = { path = "../voxcpm" }
+voxcpm_ipc = { path = "../voxcpm_ipc" }

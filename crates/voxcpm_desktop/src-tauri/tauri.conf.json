@@ -1,0 +1,28 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "VoxCPM Desktop",
+  "version": "0.1.0",
+  "identifier": "com.example.voxcpm-desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "VoxCPM Desktop",
+        "width": 960,
+        "height": 720
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "externalBin": ["binaries/engine"],
+    "resources": [],
+    "icon": []
+  }
+}

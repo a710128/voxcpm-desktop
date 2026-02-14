@@ -15,13 +15,38 @@ mod weights;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{linear_no_bias, ops, Module};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub use config::VoxCpmConfig;
 pub use error::{Result, VoxCpmError};
 pub use tokenizer::VoxCpmTokenizer;
 pub use weights::ModelPaths;
+
+/// Optional per-step generation progress callback.
+///
+/// Called with `steps_done` where one step is one iteration of the patch generation loop.
+#[derive(Clone)]
+pub struct GenerateProgressCallback(Arc<dyn Fn(usize) + Send + Sync + 'static>);
+
+impl GenerateProgressCallback {
+    pub fn new(f: impl Fn(usize) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    fn call(&self, steps_done: usize) {
+        (self.0)(steps_done)
+    }
+}
+
+impl fmt::Debug for GenerateProgressCallback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GenerateProgressCallback(..)")
+    }
+}
 
 #[derive(Debug)]
 pub struct VoxCpm {
@@ -35,6 +60,10 @@ pub struct VoxCpm {
     runtime: Option<VoxCpmRuntime>,
 
     show_progress: bool,
+
+    progress_callback: Option<GenerateProgressCallback>,
+
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Default)]
@@ -55,6 +84,8 @@ pub struct VoxCpmBuilder {
     pub dtype: Option<DType>,
     pub weights_prefix: Option<String>,
     pub show_progress: bool,
+
+    pub progress_callback: Option<GenerateProgressCallback>,
 }
 
 struct Progress {
@@ -196,6 +227,14 @@ pub struct GeneratedAudio {
 impl VoxCpm {
     pub fn builder() -> VoxCpmBuilder {
         VoxCpmBuilder::default()
+    }
+
+    /// Install (or clear) a cancellation flag for the next `generate()` call.
+    ///
+    /// If set, `generate()` will periodically check this flag and return `VoxCpmError::Cancelled`
+    /// when it becomes true.
+    pub fn set_cancel_flag(&mut self, flag: Option<Arc<AtomicBool>>) {
+        self.cancel_flag = flag;
     }
 
     /// Load the MiniCPM4 text model from `model.safetensors`.
@@ -404,6 +443,12 @@ impl VoxCpm {
 
         // Autoregressive patch generation loop.
         for i in 0..max_len {
+            if let Some(cancel) = self.cancel_flag.as_ref() {
+                if cancel.load(Ordering::Relaxed) {
+                    progress.finish();
+                    return Err(VoxCpmError::Cancelled);
+                }
+            }
             let dit_hidden_1 = rt.lm_to_dit_proj.forward(&lm_hidden)?;
             let dit_hidden_2 = rt.res_to_dit_proj.forward(&residual_hidden)?;
             let mu = (dit_hidden_1 + dit_hidden_2)?; // [1, H_dit]
@@ -481,6 +526,15 @@ impl VoxCpm {
 
             // Progress is based on generated patch count (prompt context not included).
             progress.draw(i + 1);
+            if let Some(cb) = self.progress_callback.as_ref() {
+                cb.call(i + 1);
+            }
+            if let Some(cancel) = self.cancel_flag.as_ref() {
+                if cancel.load(Ordering::Relaxed) {
+                    progress.finish();
+                    return Err(VoxCpmError::Cancelled);
+                }
+            }
             if i > min_len && stop_flag == 1 {
                 progress.finish();
                 break;
@@ -568,6 +622,14 @@ impl VoxCpm {
             pcm_f32: pcm,
             sample_rate: rt.sample_rate,
         })
+    }
+
+    /// Update the generation progress callback.
+    ///
+    /// This is intended for long-lived engine processes that reuse a single `VoxCpm` instance
+    /// across multiple generate calls.
+    pub fn set_progress_callback(&mut self, cb: Option<GenerateProgressCallback>) {
+        self.progress_callback = cb;
     }
 
     /// Capture CUDA graphs for generation.
@@ -965,6 +1027,12 @@ impl VoxCpmBuilder {
         self
     }
 
+    /// Provide a per-step generation progress callback.
+    pub fn progress_callback(mut self, cb: GenerateProgressCallback) -> Self {
+        self.progress_callback = Some(cb);
+        self
+    }
+
     pub fn build(self) -> Result<VoxCpm> {
         let paths = match self.paths {
             Some(p) => p,
@@ -1021,6 +1089,8 @@ impl VoxCpmBuilder {
             weights_prefix: self.weights_prefix,
             runtime: None,
             show_progress: self.show_progress,
+            progress_callback: self.progress_callback,
+            cancel_flag: None,
         })
     }
 
