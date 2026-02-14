@@ -27,7 +27,6 @@ pub use weights::ModelPaths;
 pub struct VoxCpm {
     device: Device,
     dtype: DType,
-    model_dir: PathBuf,
     pub config: VoxCpmConfig,
     pub tokenizer: VoxCpmTokenizer,
     pub paths: ModelPaths,
@@ -40,7 +39,19 @@ pub struct VoxCpm {
 
 #[derive(Debug, Default)]
 pub struct VoxCpmBuilder {
-    pub device: Option<Device>,
+    pub model_dir: Option<PathBuf>,
+    pub paths: Option<ModelPaths>,
+
+    /// Optional device spec string such as "cpu" or "cuda:0".
+    ///
+    /// Parsed and created inside `build()`.
+    pub device_spec: Option<String>,
+
+    /// Escape hatch: directly provide a `Device`.
+    ///
+    /// If set, this takes precedence over `device`.
+    pub device_override: Option<Device>,
+
     pub dtype: Option<DType>,
     pub weights_prefix: Option<String>,
     pub show_progress: bool,
@@ -137,6 +148,24 @@ struct VoxCpmRuntime {
     max_length: usize,
     chunk_size: usize,
     sample_rate: u32,
+
+    #[cfg(feature = "cuda")]
+    optimized: Option<VoxCpmOptimizedRuntime>,
+}
+
+#[cfg(feature = "cuda")]
+struct VoxCpmOptimizedRuntime {
+    // CUDA graph that advances base+residual cached LMs for one token.
+    base_res_step_graph: crate::cuda_graph::CudaGraphModule,
+    // CUDA graph for UnifiedCfm's CFG else-branch (dphi_dt computation), reused per Euler step.
+    cfm_cfg_graph: crate::cuda_graph::CudaGraphModule,
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for VoxCpmOptimizedRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoxCpmOptimizedRuntime").finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -165,47 +194,6 @@ pub struct GeneratedAudio {
 }
 
 impl VoxCpm {
-    /// Create a model instance from a directory on disk.
-    pub fn from_dir<P: AsRef<Path>>(dir: P, builder: VoxCpmBuilder) -> Result<Self> {
-        let model_dir = dir.as_ref().to_path_buf();
-        let paths = ModelPaths::discover(&model_dir)?;
-
-        let config_s = std::fs::read_to_string(&paths.config_json)?;
-        let config = VoxCpmConfig::from_json_str(&config_s)?;
-
-        let tokenizer = VoxCpmTokenizer::from_tokenizer_json(&paths.tokenizer_json)?;
-
-        let device = builder.device.unwrap_or(Device::Cpu);
-        let dtype = builder.dtype.or(config.dtype()).unwrap_or(DType::BF16);
-        // CPU fallback: prefer fp32 for broad op coverage and stability.
-        let dtype = if matches!(device, Device::Cpu) {
-            DType::F32
-        } else {
-            dtype
-        };
-
-        // When using the CUDA async allocator (memory pools), set the default pool's
-        // release threshold to UINT64_MAX for stability (e.g. CUDA graph capture).
-        #[cfg(feature = "cuda")]
-        if device.is_cuda() {
-            crate::cuda_graph::set_mempool_release_threshold_max(&device)?;
-        }
-
-        Ok(Self {
-            device,
-            dtype,
-            model_dir,
-            config,
-            tokenizer,
-            paths,
-
-            weights_prefix: builder.weights_prefix,
-            runtime: None,
-
-            show_progress: builder.show_progress,
-        })
-    }
-
     pub fn builder() -> VoxCpmBuilder {
         VoxCpmBuilder::default()
     }
@@ -298,6 +286,27 @@ impl VoxCpm {
             self.runtime = Some(self.load_runtime()?);
         }
 
+        // CUDA-only fast path: enabled iff optimize() was called successfully.
+        let use_optimized = {
+            #[cfg(feature = "cuda")]
+            {
+                if !self.device.is_cuda() {
+                    false
+                } else if let Some(rt) = self.runtime.as_ref() {
+                    match rt.optimized.as_ref() {
+                        Some(_opt) => true,
+                        None => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                false
+            }
+        };
+
         // Map Rust-facing args to the Python reference defaults.
         // - `max_steps`: diffusion steps per patch.
         // - `max_len`: number of patches, heuristically bounded by text length.
@@ -319,6 +328,12 @@ impl VoxCpm {
         let rt = self.runtime.as_mut().unwrap();
         let device = self.device.clone();
 
+        // If optimized, clear existing KV caches in-place without reallocating.
+        if use_optimized {
+            rt.base_lm.reset_cache_inplace()?;
+            rt.residual_lm.reset_cache_inplace()?;
+        }
+
         // Feature embedding (prompt audio patches live at the tail positions where `audio_mask==1`).
         let feat_embed = rt.feat_encoder.forward(&audio_feat)?; // [1, T, H_enc]
         let feat_embed = rt.enc_to_lm_proj.forward(&feat_embed)?; // [1, T, H_lm]
@@ -338,8 +353,10 @@ impl VoxCpm {
             (text_embed.broadcast_mul(&text_m)? + feat_embed.broadcast_mul(&audio_m)?)?;
 
         // Reset caches per generation call.
-        rt.base_lm.setup_cache(1, rt.max_length)?;
-        rt.residual_lm.setup_cache(1, rt.max_length)?;
+        if !use_optimized {
+            rt.base_lm.setup_cache(1, rt.max_length)?;
+            rt.residual_lm.setup_cache(1, rt.max_length)?;
+        }
 
         let total_len = text_token.dims2()?.1;
         let pos = arange_cache::arange_u32(total_len, &device)?;
@@ -382,6 +399,9 @@ impl VoxCpm {
             }
         }
 
+        // Keep cfg on-device (scalar tensor) for UnifiedCfm.
+        let cfg_value_t = Tensor::from_vec(vec![cfg_value as f32], (1,), audio_feat.device())?;
+
         // Autoregressive patch generation loop.
         for i in 0..max_len {
             let dit_hidden_1 = rt.lm_to_dit_proj.forward(&lm_hidden)?;
@@ -390,21 +410,60 @@ impl VoxCpm {
 
             let cond = prefix_feat_cond.transpose(1, 2)?.contiguous()?; // [1, D, P]
             let seed_i = args.seed.wrapping_add(i as u64);
-            let pred_feat = rt
-                .feat_decoder
-                .sample(
-                    &mu,
-                    &cond,
-                    rt.patch_size,
-                    n_timesteps,
-                    seed_i,
-                    1.0,
-                    cfg_value,
-                    1.0,
-                    true,
-                )?
-                .transpose(1, 2)?
-                .contiguous()?; // [1, P, D]
+            let pred_feat = if use_optimized {
+                #[cfg(feature = "cuda")]
+                {
+                    let opt = rt.optimized.as_ref().unwrap();
+                    rt.feat_decoder
+                        .sample_optimized_cuda(
+                            &mu,
+                            &cond,
+                            rt.patch_size,
+                            n_timesteps,
+                            seed_i,
+                            1.0,
+                            &cfg_value_t,
+                            1.0,
+                            true,
+                            &opt.cfm_cfg_graph,
+                        )?
+                        .transpose(1, 2)?
+                        .contiguous()?
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    // Not reachable: use_optimized is never set without the cuda feature.
+                    rt.feat_decoder
+                        .sample(
+                            &mu,
+                            &cond,
+                            rt.patch_size,
+                            n_timesteps,
+                            seed_i,
+                            1.0,
+                            &cfg_value_t,
+                            1.0,
+                            true,
+                        )?
+                        .transpose(1, 2)?
+                        .contiguous()?
+                }
+            } else {
+                rt.feat_decoder
+                    .sample(
+                        &mu,
+                        &cond,
+                        rt.patch_size,
+                        n_timesteps,
+                        seed_i,
+                        1.0,
+                        &cfg_value_t,
+                        1.0,
+                        true,
+                    )?
+                    .transpose(1, 2)?
+                    .contiguous()?
+            }; // [1, P, D]
 
             let pred_patch = pred_feat.unsqueeze(1)?; // [1, 1, P, D]
             let curr_embed = rt.feat_encoder.forward(&pred_patch)?;
@@ -428,13 +487,51 @@ impl VoxCpm {
             }
 
             // Advance cached LMs by one step.
-            let lm_next = rt.base_lm.forward_step_cached(&curr_embed)?; // [1, 1, H]
-            lm_hidden = lm_next.squeeze(1)?;
-            lm_hidden = rt.fsq_layer.forward(&lm_hidden)?; // [1, H]
+            if use_optimized {
+                #[cfg(feature = "cuda")]
+                {
+                    let opt = rt.optimized.as_ref().unwrap();
 
-            let res_inp = (&lm_hidden + &curr_embed.squeeze(1)?)?.unsqueeze(1)?;
-            let res_next = rt.residual_lm.forward_step_cached(&res_inp)?;
-            residual_hidden = res_next.squeeze(1)?;
+                    // Keep Rust-side cache position in sync (graph only replays CUDA work).
+                    let pos_base = rt.base_lm.step()?;
+                    let pos_res = rt.residual_lm.step()?;
+                    if pos_base != pos_res {
+                        return Err(VoxCpmError::InvalidArg(format!(
+                            "optimized step: base/residual cache pos mismatch {pos_base} != {pos_res}"
+                        )));
+                    }
+                    let pos_ids = Tensor::full(pos_base, (1usize,), &device)?;
+
+                    let outs = opt
+                        .base_res_step_graph
+                        .run(&[curr_embed.clone(), pos_ids])?;
+                    if outs.len() != 2 {
+                        return Err(VoxCpmError::InvalidArg(format!(
+                            "optimized step graph returned {} outputs (expected 2)",
+                            outs.len()
+                        )));
+                    }
+                    lm_hidden = outs[0].clone();
+                    residual_hidden = outs[1].clone();
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    let lm_next = rt.base_lm.forward_step_cached(&curr_embed)?;
+                    lm_hidden = lm_next.squeeze(1)?;
+                    lm_hidden = rt.fsq_layer.forward(&lm_hidden)?;
+                    let res_inp = (&lm_hidden + &curr_embed.squeeze(1)?)?.unsqueeze(1)?;
+                    let res_next = rt.residual_lm.forward_step_cached(&res_inp)?;
+                    residual_hidden = res_next.squeeze(1)?;
+                }
+            } else {
+                let lm_next = rt.base_lm.forward_step_cached(&curr_embed)?; // [1, 1, H]
+                lm_hidden = lm_next.squeeze(1)?;
+                lm_hidden = rt.fsq_layer.forward(&lm_hidden)?; // [1, H]
+
+                let res_inp = (&lm_hidden + &curr_embed.squeeze(1)?)?.unsqueeze(1)?;
+                let res_next = rt.residual_lm.forward_step_cached(&res_inp)?;
+                residual_hidden = res_next.squeeze(1)?;
+            }
         }
 
         progress.finish();
@@ -471,6 +568,129 @@ impl VoxCpm {
             pcm_f32: pcm,
             sample_rate: rt.sample_rate,
         })
+    }
+
+    /// Capture CUDA graphs for generation.
+    ///
+    /// CUDA-only. After this succeeds, `generate()` will use CUDA graphs when possible.
+    pub fn optimize(&mut self) -> Result<()> {
+        #[cfg(feature = "cuda")]
+        {
+            if !self.device.is_cuda() {
+                return Err(VoxCpmError::InvalidArg(
+                    "optimize() requires a CUDA device".into(),
+                ));
+            }
+            if self.runtime.is_none() {
+                self.runtime = Some(self.load_runtime()?);
+            }
+            let rt = self.runtime.as_mut().unwrap();
+
+            // Pre-allocate caches once so capture can reference stable device pointers.
+            rt.base_lm.setup_cache(1, rt.max_length)?;
+            rt.residual_lm.setup_cache(1, rt.max_length)?;
+            rt.base_lm.reset_cache_inplace()?;
+            rt.residual_lm.reset_cache_inplace()?;
+
+            use crate::cuda_graph::CudaGraphModule;
+
+            // (1) Combined base+residual cached step graph.
+            let h = rt.base_lm.cfg().hidden_size;
+            let curr_ex = Tensor::zeros((1usize, 1usize, h), self.dtype, &self.device)?;
+            let pos_ex = Tensor::zeros((1usize,), DType::U32, &self.device)?;
+            let base_lm = &mut rt.base_lm;
+            let residual_lm = &mut rt.residual_lm;
+            let fsq_layer = &rt.fsq_layer;
+            let base_res_step_graph = CudaGraphModule::capture(&[curr_ex, pos_ex], |ins| {
+                let curr = &ins[0];
+                let pos = &ins[1];
+                let lm_next = base_lm.forward_step(curr, pos)?; // [1, 1, H]
+                let lm_hidden = lm_next.squeeze(1)?;
+                let lm_hidden = fsq_layer.forward(&lm_hidden)?; // [1, H]
+
+                let curr_s = curr.squeeze(1)?;
+                let res_inp = (&lm_hidden + &curr_s)?.unsqueeze(1)?;
+                let res_next = residual_lm.forward_step(&res_inp, pos)?;
+                let res_hidden = res_next.squeeze(1)?;
+
+                Ok(vec![lm_hidden, res_hidden])
+            })?;
+
+            // (2) UnifiedCfm CFG else-branch graph (dphi_dt).
+            // Shapes are fixed per model config: B=1, C=feat_dim, T=patch_size.
+            let c = rt.feat_dim;
+            let t = rt.patch_size;
+            let dit_h = self.config.dit_config()?.hidden_dim;
+            let x_ex = Tensor::zeros((1usize, c, t), self.dtype, &self.device)?;
+            let mu_ex = Tensor::zeros((1usize, dit_h), self.dtype, &self.device)?;
+            let t_ex = Tensor::zeros((1usize,), DType::F32, &self.device)?;
+            let dt_ex = Tensor::zeros((1usize,), DType::F32, &self.device)?;
+            let cond_ex = Tensor::zeros((1usize, c, t), self.dtype, &self.device)?;
+            // cfg is already normalized to [1,1,1] in model dtype by the caller.
+            let cfg_ex = Tensor::zeros((1usize, 1usize, 1usize), self.dtype, &self.device)?;
+
+            let estimator = &rt.feat_decoder.estimator;
+            let mean_mode = rt.feat_decoder.mean_mode;
+            let cfm_cfg_graph = CudaGraphModule::capture(
+                &[x_ex, mu_ex, t_ex, dt_ex, cond_ex, cfg_ex],
+                move |ins| {
+                    let x = &ins[0];
+                    let mu = &ins[1];
+                    let t_prev = &ins[2];
+                    let dt_f32 = &ins[3];
+                    let cond = &ins[4];
+                    let cfg = &ins[5];
+
+                    let (b, c, tt) = x.dims3()?;
+                    let x_in = Tensor::cat(&[x, x], 0)?; // [2B, C, T]
+                    let zeros_mu = Tensor::zeros_like(mu)?;
+                    let mu_in = Tensor::cat(&[mu, &zeros_mu], 0)?; // [2B, H]
+
+                    let t_in = t_prev.broadcast_as((2 * b,))?;
+                    let dt_in = if mean_mode {
+                        dt_f32.broadcast_as((2 * b,))?
+                    } else {
+                        Tensor::zeros((2 * b,), DType::F32, x.device())?
+                    };
+                    let cond_in = Tensor::cat(&[cond, cond], 0)?;
+
+                    let pred = estimator.forward(&x_in, &mu_in, &t_in, &cond_in, &dt_in)?;
+                    let pos = pred.narrow(0, 0, b)?;
+                    let neg = pred.narrow(0, b, b)?;
+
+                    // use_cfg_zero_star = true.
+                    let pos_flat = pos.reshape((b, c * tt))?;
+                    let neg_flat = neg.reshape((b, c * tt))?;
+                    let dot = (pos_flat * &neg_flat)?.sum_keepdim(1)?;
+                    let denom = neg_flat.sqr()?.sum_keepdim(1)?;
+                    let st = dot.broadcast_div(&(denom + 1e-8)?)?;
+                    let st = st.reshape((b, 1, 1))?;
+                    let neg_scaled = neg.broadcast_mul(&st)?;
+
+                    let diff = (pos - &neg_scaled)?;
+                    let dphi_dt = (neg_scaled + diff.broadcast_mul(cfg)?)?;
+                    Ok(vec![dphi_dt])
+                },
+            )?;
+
+            // Capture will have mutated caches due to the example step; clear them.
+            rt.base_lm.reset_cache_inplace()?;
+            rt.residual_lm.reset_cache_inplace()?;
+
+            rt.optimized = Some(VoxCpmOptimizedRuntime {
+                base_res_step_graph,
+                cfm_cfg_graph,
+            });
+
+            Ok(())
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        {
+            Err(VoxCpmError::InvalidArg(
+                "optimize() requires the cuda feature".into(),
+            ))
+        }
     }
 
     fn load_runtime(&self) -> Result<VoxCpmRuntime> {
@@ -586,6 +806,9 @@ impl VoxCpm {
             max_length,
             chunk_size,
             sample_rate,
+
+            #[cfg(feature = "cuda")]
+            optimized: None,
         })
     }
 
@@ -696,8 +919,31 @@ impl VoxCpmBuilder {
         Self::default()
     }
 
-    pub fn device(mut self, device: Device) -> Self {
-        self.device = Some(device);
+    /// Provide a model directory and let VoxCPM discover required files.
+    pub fn model_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.model_dir = Some(dir.into());
+        self
+    }
+
+    /// Override model paths instead of discovering from `model_dir`.
+    pub fn paths(mut self, paths: ModelPaths) -> Self {
+        self.paths = Some(paths);
+        self
+    }
+
+    /// Select a device by string spec (e.g. "cpu" or "cuda:0").
+    ///
+    /// The device is created inside `build()`.
+    pub fn device_str(mut self, spec: impl Into<String>) -> Self {
+        self.device_spec = Some(spec.into());
+        self
+    }
+
+    /// Escape hatch: provide a fully constructed device.
+    ///
+    /// If set, this takes precedence over `device_str`.
+    pub fn device_override(mut self, device: Device) -> Self {
+        self.device_override = Some(device);
         self
     }
 
@@ -717,5 +963,90 @@ impl VoxCpmBuilder {
     pub fn show_progress(mut self, show: bool) -> Self {
         self.show_progress = show;
         self
+    }
+
+    pub fn build(self) -> Result<VoxCpm> {
+        let paths = match self.paths {
+            Some(p) => p,
+            None => {
+                let dir = self.model_dir.ok_or_else(|| {
+                    VoxCpmError::InvalidArg(
+                        "missing model_dir: set builder.model_dir(...) or builder.paths(...)"
+                            .into(),
+                    )
+                })?;
+                ModelPaths::discover(&dir)?
+            }
+        };
+
+        let config_s = std::fs::read_to_string(&paths.config_json)?;
+        let config = VoxCpmConfig::from_json_str(&config_s)?;
+        let tokenizer = VoxCpmTokenizer::from_tokenizer_json(&paths.tokenizer_json)?;
+
+        let device = match self.device_override {
+            Some(d) => d,
+            None => {
+                let spec = self.device_spec.as_deref().unwrap_or("cpu");
+                Self::create_device_from_spec(spec)?
+            }
+        };
+
+        let dtype = self.dtype.or(config.dtype()).unwrap_or(DType::BF16);
+        // CPU fallback: prefer fp32 for broad op coverage and stability.
+        let dtype = if matches!(device, Device::Cpu) {
+            DType::F32
+        } else {
+            dtype
+        };
+
+        // CUDA device init: keep behavior centralized here.
+        #[cfg(feature = "cuda")]
+        if device.is_cuda() {
+            // When using the CUDA async allocator (memory pools), set the default pool's
+            // release threshold to UINT64_MAX for stability (e.g. CUDA graph capture).
+            crate::cuda_graph::set_mempool_release_threshold_max(&device)?;
+
+            // Disable cudarc per-slice CUDA event tracking globally for this device.
+            // This makes CUDA graph capture/replay reliable (no event nodes recorded).
+            // Safety: toggles a device-wide setting; callers should not rely on event tracking.
+            unsafe { device.as_cuda_device()?.disable_event_tracking() };
+        }
+
+        Ok(VoxCpm {
+            device,
+            dtype,
+            config,
+            tokenizer,
+            paths,
+            weights_prefix: self.weights_prefix,
+            runtime: None,
+            show_progress: self.show_progress,
+        })
+    }
+
+    fn create_device_from_spec(spec: &str) -> Result<Device> {
+        let s = spec.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("cpu") {
+            return Ok(Device::Cpu);
+        }
+        if let Some(rest) = s.strip_prefix("cuda:") {
+            let idx: usize = rest
+                .parse()
+                .map_err(|_| VoxCpmError::InvalidArg(format!("invalid cuda device index: {s}")))?;
+            #[cfg(feature = "cuda")]
+            {
+                return Ok(Device::new_cuda_with_stream(idx)?);
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = idx;
+                return Err(VoxCpmError::InvalidArg(
+                    "requested CUDA device but crate not built with feature cuda".into(),
+                ));
+            }
+        }
+        Err(VoxCpmError::InvalidArg(format!(
+            "unsupported device spec: {s} (use cpu or cuda:N)"
+        )))
     }
 }

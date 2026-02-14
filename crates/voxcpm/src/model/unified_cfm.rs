@@ -8,6 +8,9 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rand_distr::StandardNormal;
 
+#[cfg(feature = "cuda")]
+use crate::cuda_graph::CudaGraphModule;
+
 pub trait VelocityEstimator {
     fn forward(
         &self,
@@ -133,7 +136,7 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
         n_timesteps: usize,
         seed: u64,
         temperature: f64,
-        cfg_value: f64,
+        cfg_value: &Tensor,
         sway_sampling_coef: f64,
         use_cfg_zero_star: bool,
     ) -> Result<Tensor> {
@@ -149,6 +152,52 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
         self.solve_euler(&z, &t_span, mu, cond, cfg_value, use_cfg_zero_star)
     }
 
+    /// CUDA-only optimized sampler.
+    ///
+    /// Uses a captured CUDA graph for the CFG else-branch (`dphi_dt` computation) and
+    /// replays it each Euler step.
+    #[cfg(feature = "cuda")]
+    pub fn sample_optimized_cuda(
+        &self,
+        mu: &Tensor,
+        cond: &Tensor,
+        patch_size: usize,
+        n_timesteps: usize,
+        seed: u64,
+        temperature: f64,
+        cfg_value: &Tensor,
+        sway_sampling_coef: f64,
+        use_cfg_zero_star: bool,
+        cfg_graph: &CudaGraphModule,
+    ) -> Result<Tensor> {
+        if !mu.device().is_cuda() {
+            candle_core::bail!("sample_optimized_cuda requires CUDA tensors")
+        }
+        if !use_cfg_zero_star {
+            candle_core::bail!("sample_optimized_cuda requires use_cfg_zero_star=true")
+        }
+        let (b, _) = mu.dims2()?;
+        if b != 1 {
+            candle_core::bail!("sample_optimized_cuda currently expects batch_size==1")
+        }
+
+        let dtype = mu.dtype();
+        let dev = mu.device();
+        let z = self.randn_tensor((b, self.in_channels, patch_size), dev, seed, dtype)?;
+        let z = (&z * temperature)?;
+
+        let t_span = t_span_device(n_timesteps, sway_sampling_coef, dev)?;
+        self.solve_euler_optimized_cuda(
+            &z,
+            &t_span,
+            mu,
+            cond,
+            cfg_value,
+            use_cfg_zero_star,
+            cfg_graph,
+        )
+    }
+
     /// Euler solver with CFG.
     ///
     /// - x: [B, C, T]
@@ -159,9 +208,12 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
         t_span: &Tensor,
         mu: &Tensor,
         cond: &Tensor,
-        cfg_value: f64,
+        cfg_value: &Tensor,
         use_cfg_zero_star: bool,
     ) -> Result<Tensor> {
+        // cfg_value must be a device scalar. Keep it as a tensor so all math stays on-device.
+        let cfg = cfg_scalar_1x1x1(cfg_value, x.dtype())?;
+
         // The upstream builds t_span in the model dtype; we use f32 for stability.
         // `t_span_device` returns f32, but allow callers to pass other dtypes.
         let t_span = if t_span.dtype() == DType::F32 {
@@ -232,7 +284,7 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
                 };
 
                 let diff = (pos - &neg_scaled)?;
-                (neg_scaled + (&diff * cfg_value)?)?
+                (neg_scaled + diff.broadcast_mul(&cfg)?)?
             };
 
             // dt is scalar ([1]) and must match dtype for the update.
@@ -243,6 +295,99 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
 
         Ok(cur)
     }
+
+    #[cfg(feature = "cuda")]
+    fn solve_euler_optimized_cuda(
+        &self,
+        x: &Tensor,
+        t_span: &Tensor,
+        mu: &Tensor,
+        cond: &Tensor,
+        cfg_value: &Tensor,
+        use_cfg_zero_star: bool,
+        cfg_graph: &CudaGraphModule,
+    ) -> Result<Tensor> {
+        if !use_cfg_zero_star {
+            candle_core::bail!("solve_euler_optimized_cuda requires use_cfg_zero_star=true")
+        }
+        // cfg_value must be a device scalar. Keep it as a tensor so all math stays on-device.
+        let cfg = cfg_scalar_1x1x1(cfg_value, x.dtype())?;
+
+        let t_span = if t_span.dtype() == DType::F32 {
+            t_span.clone()
+        } else {
+            t_span.to_dtype(DType::F32)?
+        };
+        let n_steps = t_span.dims1()?;
+        if n_steps < 2 {
+            candle_core::bail!("t_span must have len>=2")
+        }
+        let (b, c, _t) = x.dims3()?;
+        if b != 1 {
+            candle_core::bail!("solve_euler_optimized_cuda expects B==1")
+        }
+        if c != self.in_channels {
+            candle_core::bail!(
+                "UnifiedCfm expects in_channels={}, got C={c}",
+                self.in_channels
+            )
+        }
+        let (bm, _) = mu.dims2()?;
+        if bm != b {
+            candle_core::bail!("mu batch mismatch: expected B={b}, got {bm}")
+        }
+        let (bc, cc, _) = cond.dims3()?;
+        if (bc, cc) != (b, c) {
+            candle_core::bail!(
+                "cond shape mismatch: expected [B={b}, C={c}, T'], got [{bc}, {cc}, _]"
+            )
+        }
+
+        let zero_init_steps = ((n_steps as f32) * 0.04).floor() as usize;
+        let zero_init_steps = zero_init_steps.max(1);
+
+        let mut cur = x.clone();
+        for step in 1..n_steps {
+            let t_prev = t_span.narrow(0, step - 1, 1)?; // [1]
+            let t_next = t_span.narrow(0, step, 1)?; // [1]
+            let dt_f32 = (&t_prev - &t_next)?; // [1]
+
+            let dphi_dt = if use_cfg_zero_star && step <= zero_init_steps {
+                Tensor::zeros_like(&cur)?
+            } else {
+                // Replay the captured CFG block graph.
+                let outs = cfg_graph.run(&[
+                    cur.clone(),
+                    mu.clone(),
+                    t_prev.clone(),
+                    dt_f32.clone(),
+                    cond.clone(),
+                    cfg.clone(),
+                ])?;
+                if outs.len() != 1 {
+                    candle_core::bail!("cfg_graph returned {} outputs (expected 1)", outs.len())
+                }
+                outs[0].clone()
+            };
+
+            let dt = dt_f32.to_dtype(cur.dtype())?.reshape((1, 1, 1))?;
+            let delta = dphi_dt.broadcast_mul(&dt)?;
+            cur = (&cur - &delta)?;
+        }
+
+        Ok(cur)
+    }
+}
+
+fn cfg_scalar_1x1x1(cfg_value: &Tensor, dtype: DType) -> Result<Tensor> {
+    // Accept any shape as long as it contains exactly 1 element.
+    // We reshape to [1, 1, 1] so `broadcast_mul` is unambiguous.
+    let flat = cfg_value.flatten_all()?;
+    let n = flat.dims1()?;
+    if n != 1 {
+        candle_core::bail!("cfg_value must be a scalar tensor (1 element), got {n} elements")
+    }
+    flat.narrow(0, 0, 1)?.to_dtype(dtype)?.reshape((1, 1, 1))
 }
 
 fn t_span_device(n_timesteps: usize, sway_sampling_coef: f64, device: &Device) -> Result<Tensor> {
@@ -335,7 +480,8 @@ mod tests {
 
         let n_steps = 10usize;
         let t_span = Tensor::from_vec(build_t_span(n_steps, 0.0), (n_steps + 1,), &dev)?;
-        let out = cfm.solve_euler(&x0, &t_span, &mu, &cond, 1.0, false)?;
+        let cfg = Tensor::from_vec(vec![1f32], (1,), &dev)?;
+        let out = cfm.solve_euler(&x0, &t_span, &mu, &cond, &cfg, false)?;
 
         // With v=x and constant dt=1/n, Euler gives x_n = (1-1/n)^n x0.
         let dt = 1.0 / (n_steps as f32);
@@ -362,7 +508,8 @@ mod tests {
 
         let t_span = Tensor::from_vec(vec![1.0f32, 0.0f32], (2,), &dev)?; // single Euler step, dt=1
         let cfg = 2.5f64;
-        let out = cfm.solve_euler(&x0, &t_span, &mu, &cond, cfg, false)?;
+        let cfg_t = Tensor::from_vec(vec![cfg as f32], (1,), &dev)?;
+        let out = cfm.solve_euler(&x0, &t_span, &mu, &cond, &cfg_t, false)?;
 
         // v = neg + cfg*(pos - neg) = cfg
         // x1 = x0 - dt*v = -cfg
@@ -383,9 +530,11 @@ mod tests {
         let mu = Tensor::zeros((b, 4), DType::F32, &dev)?;
         let cond = Tensor::zeros((b, 2, 5), DType::F32, &dev)?;
 
-        let a = cfm.sample(&mu, &cond, 5, 8, 123, 1.0, 1.0, 0.0, true)?;
-        let b2 = cfm.sample(&mu, &cond, 5, 8, 123, 1.0, 1.0, 0.0, true)?;
-        let c2 = cfm.sample(&mu, &cond, 5, 8, 124, 1.0, 1.0, 0.0, true)?;
+        let cfg = Tensor::from_vec(vec![1f32], (1,), &dev)?;
+
+        let a = cfm.sample(&mu, &cond, 5, 8, 123, 1.0, &cfg, 0.0, true)?;
+        let b2 = cfm.sample(&mu, &cond, 5, 8, 123, 1.0, &cfg, 0.0, true)?;
+        let c2 = cfm.sample(&mu, &cond, 5, 8, 124, 1.0, &cfg, 0.0, true)?;
 
         let da = a.flatten_all()?.to_vec1::<f32>()?;
         let db = b2.flatten_all()?.to_vec1::<f32>()?;

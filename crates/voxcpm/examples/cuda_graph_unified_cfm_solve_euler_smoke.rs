@@ -57,7 +57,8 @@ mod cuda_impl {
 
         let (b, c, t, h, tprime) = (1usize, 2usize, 8usize, 4usize, 5usize);
         let n_steps = 4usize;
-        let cfg_value = 2.5f64;
+        let cfg_value_f64 = 2.5f64;
+        let cfg_value = Tensor::from_vec(vec![cfg_value_f64 as f32], (1usize,), &dev)?;
 
         let est = DummyEstimator { mode: 1 };
         let cfm = UnifiedCfm::new(c, est, false);
@@ -69,7 +70,8 @@ mod cuda_impl {
 
         let example_inputs = vec![x0, t_span0, mu0, cond0];
         let module = CudaGraphModule::capture(&example_inputs, |ins| {
-            cfm.solve_euler(&ins[0], &ins[1], &ins[2], &ins[3], cfg_value, false)
+            let out = cfm.solve_euler(&ins[0], &ins[1], &ins[2], &ins[3], &cfg_value, false)?;
+            Ok(vec![out])
         })?;
 
         for iter in 0..3usize {
@@ -80,6 +82,7 @@ mod cuda_impl {
             let cond = Tensor::zeros((b, c, tprime), DType::F32, module.device())?;
 
             let out = module.run(&[x, t_span, mu, cond])?;
+            let out = &out[0];
             let (ob, oc, ot) = out.dims3()?;
             if (ob, oc, ot) != (b, c, t) {
                 candle_core::bail!("unexpected output shape: got ({ob},{oc},{ot})")

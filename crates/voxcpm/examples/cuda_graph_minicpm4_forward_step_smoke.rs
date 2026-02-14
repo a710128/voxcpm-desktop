@@ -74,13 +74,15 @@ mod cuda_impl {
         // Capture: ins[0]=x_embed [B,1,H], ins[1]=position_id [B].
         let module = CudaGraphModule::capture(&example_inputs, |ins| {
             let mut m = model.borrow_mut();
-            m.forward_step(&ins[0], &ins[1])
+            let y = m.forward_step(&ins[0], &ins[1])?;
+            Ok(vec![y])
         })?;
 
         for iter in 0..3usize {
             let x = mk_x(bs, hidden, 0.2 + 0.3 * (iter as f32), module.device())?;
             let p = Tensor::from_vec(vec![0u32; bs], (bs,), module.device())?;
             let y = module.run(&[x, p])?;
+            let y = &y[0];
             let (yb, ys, yh) = y.dims3()?;
             if (yb, ys, yh) != (bs, 1, hidden) {
                 candle_core::bail!("unexpected output shape: got ({yb},{ys},{yh})")

@@ -713,6 +713,25 @@ impl MiniCpmModel {
         Ok(())
     }
 
+    /// Reset KV cache contents to zeros and rewind the cache position.
+    ///
+    /// This is intended for CUDA graph replay: it keeps the existing cache storage
+    /// (no re-allocation) and just clears it in-place.
+    pub fn reset_cache_inplace(&mut self) -> Result<()> {
+        if self.kv_max_length == 0 {
+            candle_core::bail!("KV cache is not setup")
+        }
+        for layer in self.layers.iter_mut() {
+            let Some(cache) = layer.self_attn.cache.as_ref() else {
+                candle_core::bail!("KV cache is not setup")
+            };
+            cache.k.zero_set()?;
+            cache.v.zero_set()?;
+        }
+        self.kv_current_length = 0;
+        Ok(())
+    }
+
     /// Advance the internal cache position and return the previous index.
     pub fn step(&mut self) -> Result<u32> {
         if self.kv_max_length == 0 {

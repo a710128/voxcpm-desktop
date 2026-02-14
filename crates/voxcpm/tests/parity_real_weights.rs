@@ -511,7 +511,8 @@ fn parity_cfm_solve_euler() -> Result<()> {
     let estimator =
         model::locdit::VoxCpmLocDiT::new(dit_cfg, feat_dim, vb.pp("feat_decoder").pp("estimator"))?;
     let cfm = model::unified_cfm::UnifiedCfm::new(feat_dim, estimator, false);
-    let y = cfm.solve_euler(x0, &t_span, mu, cond, cfg_value, use_zero_star)?;
+    let cfg_value_t = Tensor::from_vec(vec![cfg_value as f32], (1usize,), &dev)?;
+    let y = cfm.solve_euler(x0, &t_span, mu, cond, &cfg_value_t, use_zero_star)?;
     allclose(&y, y_ref, atol, rtol)
 }
 

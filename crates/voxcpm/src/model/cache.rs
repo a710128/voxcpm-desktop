@@ -87,11 +87,9 @@ impl StaticKvCache {
 
     /// Clear the whole cache to zeros.
     pub fn clear(&mut self) -> Result<()> {
-        let (bs, kvh, max_len, hd) = self.k.dims4()?;
-        let dtype = self.k.dtype();
-        let dev = self.k.device().clone();
-        self.k = Tensor::zeros((bs, kvh, max_len, hd), dtype, &dev)?;
-        self.v = Tensor::zeros((bs, kvh, max_len, hd), dtype, &dev)?;
+        // Important for CUDA graph capture/replay: do not re-allocate storage.
+        self.k.zero_set()?;
+        self.v.zero_set()?;
         Ok(())
     }
 

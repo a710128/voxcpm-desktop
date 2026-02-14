@@ -142,7 +142,8 @@ mod cuda_impl {
             if ins.len() != 2 {
                 candle_core::bail!("expected 2 inputs")
             }
-            Ok((&ins[0] * &ins[1])?.tanh()?)
+            let out = (&ins[0] * &ins[1])?.tanh()?;
+            Ok(vec![out])
         })?;
 
         for iter in 0..3usize {
@@ -156,7 +157,7 @@ mod cuda_impl {
             b_in.inplace_op1(&CopyFromHostF32 { data: b_it.clone() })?;
 
             let out = module.run(&[a_in, b_in])?;
-            let got = flatten2(out.to_vec2::<f32>()?);
+            let got = flatten2(out[0].to_vec2::<f32>()?);
             let expect = compute_cpu(&a_it, &b_it, shape)?;
 
             let diff = max_abs_diff(&got, &expect);

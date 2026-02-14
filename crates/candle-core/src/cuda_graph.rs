@@ -162,14 +162,19 @@ impl InplaceOp2 for CopyDtod {
 /// A small helper that captures a CUDA graph from a build closure, then replays it.
 ///
 /// - Capture allocates internal input slots (same dtype/shape as `example_inputs`).
+/// - The `build` closure is called twice (warm-up, then during capture) to force
+///   kernel/module loading outside of capture.
 /// - `run()` D2D-copies caller-provided inputs into those slots, launches the graph,
-///   then D2D-copies the captured output into a fresh tensor and synchronizes.
+///   then D2D-copies the captured outputs into fresh tensors and synchronizes.
 /// - Shape/dtype/device mismatch at run-time is an error.
+/// - Captured outputs are forced to be contiguous (during capture) so `CopyDtod`
+///   can be used for the output snapshot copies.
 pub struct CudaGraphModule {
     cuda: Device,
     in_specs: Vec<(DType, Vec<usize>)>,
     in_slots: Vec<Tensor>,
-    out_slot: Tensor,
+    out_specs: Vec<(DType, Vec<usize>)>,
+    out_slots: Vec<Tensor>,
     graph: CudaGraph,
     // Pinned host buffers created during capture (e.g. via clone_htod) must remain alive
     // for the lifetime of the captured graph.
@@ -181,9 +186,9 @@ impl CudaGraphModule {
         &self.cuda
     }
 
-    pub fn capture<F>(example_inputs: &[Tensor], build: F) -> Result<Self>
+    pub fn capture<F>(example_inputs: &[Tensor], mut build: F) -> Result<Self>
     where
-        F: Fn(&[Tensor]) -> Result<Tensor>,
+        F: FnMut(&[Tensor]) -> Result<Vec<Tensor>>,
     {
         if example_inputs.is_empty() {
             crate::bail!("cuda graph capture: expected at least 1 input")
@@ -267,7 +272,32 @@ impl CudaGraphModule {
             .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
             .map_err(cudarc_err)?;
 
-        let out_slot = build(&in_slots)?;
+        let outs = build(&in_slots)?;
+        if outs.is_empty() {
+            crate::bail!("cuda graph capture: expected at least 1 output")
+        }
+
+        // Ensure captured outputs are CUDA tensors on the same device, and contiguous.
+        // Contiguity is important because `CopyDtod` only supports contiguous layouts.
+        let mut out_specs = Vec::with_capacity(outs.len());
+        let mut out_slots = Vec::with_capacity(outs.len());
+        for (i, t) in outs.into_iter().enumerate() {
+            if !t.device().is_cuda() || !t.device().same_device(&cuda) {
+                crate::bail!(
+                    "cuda graph capture: output[{i}] must be on the same cuda device/stream"
+                )
+            }
+            let t = if t.is_contiguous() {
+                t
+            } else {
+                t.contiguous()?
+            };
+            if !t.is_contiguous() {
+                crate::bail!("cuda graph capture: output[{i}] expected contiguous")
+            }
+            out_specs.push((t.dtype(), t.dims().to_vec()));
+            out_slots.push(t);
+        }
 
         let graph = stream
             .end_capture(
@@ -285,13 +315,14 @@ impl CudaGraphModule {
             cuda,
             in_specs,
             in_slots,
-            out_slot,
+            out_specs,
+            out_slots,
             graph,
             _keepalive: keepalive,
         })
     }
 
-    pub fn run(&self, inputs: &[Tensor]) -> Result<Tensor> {
+    pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>> {
         if inputs.len() != self.in_specs.len() {
             crate::bail!(
                 "cuda graph run: input count mismatch {} != {}",
@@ -341,9 +372,31 @@ impl CudaGraphModule {
             .synchronize()
             .map_err(cudarc_err)?;
 
-        // Copy output snapshot and return it.
-        let out_copy = Tensor::zeros(self.out_slot.shape(), self.out_slot.dtype(), &self.cuda)?;
-        out_copy.inplace_op2(&self.out_slot, &CopyDtod)?;
+        if self.out_specs.len() != self.out_slots.len() {
+            crate::bail!(
+                "cuda graph run: internal output count mismatch {} != {}",
+                self.out_specs.len(),
+                self.out_slots.len()
+            )
+        }
+
+        // Copy output snapshots and return them.
+        let mut out_copies = Vec::with_capacity(self.out_slots.len());
+        for (i, (slot, (dt, dims))) in self.out_slots.iter().zip(self.out_specs.iter()).enumerate()
+        {
+            if slot.dtype() != *dt || slot.dims() != dims.as_slice() {
+                crate::bail!(
+                    "cuda graph run: internal output[{i}] spec mismatch {:?}{:?} vs {:?}{:?}",
+                    slot.dtype(),
+                    slot.dims(),
+                    dt,
+                    dims
+                )
+            }
+            let out_copy = Tensor::zeros(slot.shape(), slot.dtype(), &self.cuda)?;
+            out_copy.inplace_op2(slot, &CopyDtod)?;
+            out_copies.push(out_copy);
+        }
 
         // Always sync before returning.
         self.cuda
@@ -352,6 +405,6 @@ impl CudaGraphModule {
             .synchronize()
             .map_err(cudarc_err)?;
 
-        Ok(out_copy)
+        Ok(out_copies)
     }
 }
