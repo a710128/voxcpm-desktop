@@ -6,6 +6,8 @@
 mod arange_cache;
 mod audio;
 mod config;
+#[cfg(feature = "cuda")]
+pub mod cuda_graph;
 mod error;
 pub mod model;
 mod tokenizer;
@@ -181,6 +183,13 @@ impl VoxCpm {
         } else {
             dtype
         };
+
+        // When using the CUDA async allocator (memory pools), set the default pool's
+        // release threshold to UINT64_MAX for stability (e.g. CUDA graph capture).
+        #[cfg(feature = "cuda")]
+        if device.is_cuda() {
+            crate::cuda_graph::set_mempool_release_threshold_max(&device)?;
+        }
 
         Ok(Self {
             device,

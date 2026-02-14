@@ -3,3 +3,6 @@ resolver = "2"
 members = [
     "crates/voxcpm",
 ]
+
+[patch.crates-io]
+candle-core = { path = "crates/candle-core" }
