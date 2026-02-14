@@ -1099,6 +1099,36 @@ impl VoxCpmBuilder {
         if s.is_empty() || s.eq_ignore_ascii_case("cpu") {
             return Ok(Device::Cpu);
         }
+
+        // Apple GPU backend (Candle Metal). Accept common aliases.
+        if s.eq_ignore_ascii_case("metal") || s.eq_ignore_ascii_case("mps") {
+            #[cfg(feature = "metal")]
+            {
+                return Ok(Device::new_metal(0)?);
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                return Err(VoxCpmError::InvalidArg(
+                    "requested Metal device but crate not built with feature metal".into(),
+                ));
+            }
+        }
+        if let Some(rest) = s.strip_prefix("metal:").or_else(|| s.strip_prefix("mps:")) {
+            let idx: usize = rest
+                .parse()
+                .map_err(|_| VoxCpmError::InvalidArg(format!("invalid metal device index: {s}")))?;
+            #[cfg(feature = "metal")]
+            {
+                return Ok(Device::new_metal(idx)?);
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                let _ = idx;
+                return Err(VoxCpmError::InvalidArg(
+                    "requested Metal device but crate not built with feature metal".into(),
+                ));
+            }
+        }
         if let Some(rest) = s.strip_prefix("cuda:") {
             let idx: usize = rest
                 .parse()
@@ -1116,7 +1146,7 @@ impl VoxCpmBuilder {
             }
         }
         Err(VoxCpmError::InvalidArg(format!(
-            "unsupported device spec: {s} (use cpu or cuda:N)"
+            "unsupported device spec: {s} (use cpu, cuda:N, metal[:N])"
         )))
     }
 }

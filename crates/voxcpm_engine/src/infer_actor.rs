@@ -161,39 +161,11 @@ impl ActorState {
         }
 
         let device_spec = req.device_spec.trim().to_string();
-        if device_spec.eq_ignore_ascii_case("cpu") || device_spec.is_empty() {
+        if device_spec.is_empty() || device_spec.eq_ignore_ascii_case("cpu") {
             builder = builder.device_str("cpu");
-        } else if device_spec.to_ascii_lowercase().starts_with("cuda:") {
-            builder = builder.device_str(device_spec.clone());
-        } else if device_spec.eq_ignore_ascii_case("metal")
-            || device_spec.to_ascii_lowercase().starts_with("metal:")
-        {
-            let idx = device_spec
-                .split_once(':')
-                .and_then(|(_, s)| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            #[cfg(feature = "metal")]
-            {
-                let dev = candle_core::Device::new_metal(idx).map_err(|e| e.to_string())?;
-                builder = builder.device_override(dev);
-            }
-            #[cfg(not(feature = "metal"))]
-            {
-                let _ = idx;
-                return Err(ActorError {
-                    code: "load_failed".to_string(),
-                    message: "requested Metal device but engine not built with feature metal".to_string(),
-                    retryable: false,
-                });
-            }
         } else {
-            return Err(ActorError {
-                code: "load_failed".to_string(),
-                message: format!(
-                    "unsupported device_spec: {device_spec} (use cpu, cuda:N, metal[:N])"
-                ),
-                retryable: false,
-            });
+            // Keep device parsing centralized in voxcpm.
+            builder = builder.device_str(device_spec.clone());
         }
 
         #[allow(unused_mut)]

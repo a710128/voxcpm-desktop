@@ -13,6 +13,12 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, TryLockError};
 
+// `objc2-metal` requires linking CoreGraphics for `MTLCreateSystemDefaultDevice`.
+// Without this, device enumeration may return empty even on Metal-capable Macs.
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {}
+
 mod device;
 pub use device::{DeviceId, MetalDevice};
 
