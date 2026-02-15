@@ -425,7 +425,7 @@ impl MiniCpmAttention {
         let repeat = self.num_heads / self.num_kv_heads;
 
         let out = match x.device() {
-            Device::Cpu => {
+            Device::Cpu | Device::Metal(_) => {
                 // CPU path keeps the existing behavior (host position read + cache slicing).
                 let pos = position_id.flatten_all()?.to_vec1::<u32>()?[0] as usize;
                 if pos >= self.cache_max_len {
@@ -446,7 +446,7 @@ impl MiniCpmAttention {
                 let attn = ops::softmax(&scores, D::Minus1)?;
                 attn.matmul(&v_all)? // [bs, h, 1, hd]
             }
-            Device::Cuda(_) | Device::Metal(_) => {
+            Device::Cuda(_)  => {
                 // GPU path avoids device->host sync by:
                 // - writing the cache with scatter_set (per-batch indices)
                 // - using a device-side mask over the full cache tensors

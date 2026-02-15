@@ -410,7 +410,7 @@ mod tauri_sidecar {
             let drop_kill: Box<dyn FnOnce() + Send + 'static> = {
                 let child_arc = child_arc.clone();
                 Box::new(move || {
-                    if let Some(mut c) = child_arc.lock().unwrap().take() {
+                    if let Some(c) = child_arc.lock().unwrap().take() {
                         let _ = c.kill();
                     }
                 })

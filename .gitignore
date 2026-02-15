@@ -9,3 +9,5 @@ parity_out/
 models/
 
 *.wav
+
+crates/voxcpm_desktop/src-tauri/binaries/

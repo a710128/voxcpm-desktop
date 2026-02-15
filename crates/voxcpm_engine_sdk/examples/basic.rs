@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("model_dir: {model_dir}");
 
     let model = sdk
-        .load_model(2, model_dir, "cuda:5".to_string(), None, false)
+        .load_model(2, model_dir, "metal".to_string(), None, false)
         .await?;
     eprintln!("model_id: {}", model.model_id);
 

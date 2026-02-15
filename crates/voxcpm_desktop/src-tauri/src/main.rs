@@ -45,7 +45,6 @@ impl Hash for ModelKey {
     }
 }
 
-#[derive(Debug)]
 struct AppState {
     engine: EngineSdk,
     models: Mutex<HashMap<ModelKey, ModelHandle>>,
@@ -138,25 +137,29 @@ async fn infer(window: tauri::WebviewWindow, params: InferParams) -> Result<Resp
         optimize,
     };
 
-    let model = {
-        if let Some(m) = st.models.lock().unwrap().get(&key).cloned() {
-            m
-        } else {
-            let job_id = next_job_id();
-            let m = st
-                .engine
-                .load_model(
-                    job_id,
-                    params.model_dir,
-                    device_spec,
-                    weights_prefix,
-                    optimize,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            st.models.lock().unwrap().insert(key, m.clone());
-            m
-        }
+    // Don't hold a `MutexGuard` across `.await` (Tauri commands require `Send`).
+    let cached = {
+        let g = st.models.lock().unwrap();
+        g.get(&key).cloned()
+    };
+
+    let model = if let Some(m) = cached {
+        m
+    } else {
+        let job_id = next_job_id();
+        let m = st
+            .engine
+            .load_model(
+                job_id,
+                params.model_dir,
+                device_spec,
+                weights_prefix,
+                optimize,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        st.models.lock().unwrap().insert(key, m.clone());
+        m
     };
 
     let prompt_bytes: Option<Vec<u8>> = match normalize_opt_str(params.prompt_wav) {
@@ -201,7 +204,10 @@ fn main() {
             let engine = tauri::async_runtime::block_on(async {
                 EngineSdk::spawn_tauri_sidecar(&app_handle, "engine").await
             })
-            .map_err(|e| tauri::Error::Setup(e.to_string().into()))?;
+            .map_err(|e| {
+                let err: Box<dyn std::error::Error> = Box::new(e);
+                tauri::Error::Setup(err.into())
+            })?;
 
             let st = AppState {
                 engine,
