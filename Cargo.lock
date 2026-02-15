@@ -5708,6 +5708,8 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "candle-core",
+ "candle-metal-kernels",
+ "cudarc 0.19.2",
  "futures-util",
  "hound",
  "reqwest 0.12.28",

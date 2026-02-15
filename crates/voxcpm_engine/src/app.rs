@@ -5,14 +5,14 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
 
 use crate::download::handle_download_model;
-use crate::inference::{handle_exit, handle_generate, handle_load_model, handle_stop};
 use crate::infer_actor::InferenceActorHandle;
+use crate::inference::{handle_exit, handle_generate, handle_load_model, handle_stop};
 use crate::ipc::OutTx;
 use crate::state::EngineState;
 
 use voxcpm_ipc::{
-    encode_frame, try_decode_frame, EngineEvent, EngineToHost, HostToEngine, LogLevel,
-    DEFAULT_MAX_FRAME_LEN,
+    encode_frame, try_decode_frame, EngineEvent, EngineOp, EngineResponse, EngineToHost,
+    HostToEngine, ListDevicesRequest, ListDevicesResponse, LogLevel, DEFAULT_MAX_FRAME_LEN,
 };
 
 pub(crate) async fn run() -> Result<(), String> {
@@ -106,5 +106,64 @@ async fn handle_msg(
         HostToEngine::Generate(req) => handle_generate(st, out_tx, req).await,
         HostToEngine::StopGenerate(req) => handle_stop(st, out_tx, req).await,
         HostToEngine::Exit(req) => handle_exit(st, out_tx, req).await,
+        HostToEngine::ListDevices(req) => handle_list_devices(out_tx, req).await,
     }
+}
+
+async fn handle_list_devices(out_tx: OutTx, req: ListDevicesRequest) -> Result<(), String> {
+    let job_id = req.job_id;
+    let _ = out_tx
+        .send(EngineToHost::Ack {
+            job_id,
+            op: EngineOp::ListDevices,
+        })
+        .await;
+
+    let devices = list_devices();
+
+    let _ = out_tx
+        .send(EngineToHost::Response(EngineResponse::ListDevices(
+            ListDevicesResponse { job_id, devices },
+        )))
+        .await;
+    Ok(())
+}
+
+fn list_devices() -> Vec<String> {
+    let mut devices = vec!["cpu".to_string()];
+    devices.extend(list_cuda_devices());
+    devices.extend(list_metal_devices());
+    devices
+}
+
+#[cfg(feature = "cuda")]
+fn list_cuda_devices() -> Vec<String> {
+    // Use cudarc (driver API) to query device count.
+    use cudarc::driver::result;
+    if result::init().is_err() {
+        return vec![];
+    }
+    let n = match result::device::get_count() {
+        Ok(n) => n,
+        Err(_) => return vec![],
+    };
+    let n = if n < 0 { 0 } else { n as usize };
+    (0..n).map(|i| format!("cuda:{i}")).collect()
+}
+
+#[cfg(not(feature = "cuda"))]
+fn list_cuda_devices() -> Vec<String> {
+    vec![]
+}
+
+#[cfg(feature = "metal")]
+fn list_metal_devices() -> Vec<String> {
+    // candle-metal-kernels currently exposes only the system default device (0 or 1).
+    let devs = candle_metal_kernels::metal::Device::all();
+    (0..devs.len()).map(|i| format!("metal:{i}")).collect()
+}
+
+#[cfg(not(feature = "metal"))]
+fn list_metal_devices() -> Vec<String> {
+    vec![]
 }

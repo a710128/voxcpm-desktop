@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::{InvokeResponseBody, Response};
 use tauri::{Emitter, Manager};
 
@@ -12,6 +14,10 @@ use voxcpm_engine_sdk::{EngineSdk, Event, ModelHandle};
 use voxcpm_ipc::EngineEvent;
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
+
+const DEFAULT_REPO_ID: &str = "openbmb/VoxCPM1.5";
+const DEFAULT_REVISION: &str = "main";
+const HF_MIRROR_ENDPOINT: &str = "https://hf-mirror.com";
 
 fn next_job_id() -> u64 {
     NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed)
@@ -48,6 +54,62 @@ impl Hash for ModelKey {
 struct AppState {
     engine: EngineSdk,
     models: Mutex<HashMap<ModelKey, ModelHandle>>,
+    prepared_default: Mutex<Option<PreparedDefault>>,
+    active_download_job_id: AtomicU64,
+    active_generate_job_id: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedDefault {
+    device_spec: String,
+    model_dir: String,
+    model: ModelHandle,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilitiesResponse {
+    devices: Vec<String>,
+    mirror_default: bool,
+    default_model: DefaultModelInfo,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultModelInfo {
+    repo_id: String,
+    revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareDefaultModelParams {
+    device_spec: String,
+    #[serde(default)]
+    mirror: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareDefaultModelResult {
+    model_loaded: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateV1Params {
+    device_spec: String,
+    target_text: String,
+    #[serde(default)]
+    reference_audio_path: Option<String>,
+    #[serde(default)]
+    reference_audio_bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    reference_text: Option<String>,
+    cfg_value: f64,
+    inference_steps: usize,
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,7 +141,7 @@ struct EnsureModelParams {
 }
 
 fn default_hf_repo_id() -> String {
-    "openbmb/VoxCPM1.5".to_string()
+    DEFAULT_REPO_ID.to_string()
 }
 
 fn normalize_opt_str(s: Option<String>) -> Option<String> {
@@ -92,7 +154,10 @@ fn normalize_opt_str(s: Option<String>) -> Option<String> {
 }
 
 #[tauri::command]
-async fn ensure_model(window: tauri::WebviewWindow, params: EnsureModelParams) -> Result<String, String> {
+async fn ensure_model(
+    window: tauri::WebviewWindow,
+    params: EnsureModelParams,
+) -> Result<String, String> {
     let app = window.app_handle();
     let st = app.state::<AppState>();
 
@@ -103,6 +168,7 @@ async fn ensure_model(window: tauri::WebviewWindow, params: EnsureModelParams) -
     let revision = params.revision.unwrap_or_else(|| "main".to_string());
 
     let job_id = next_job_id();
+    st.active_download_job_id.store(job_id, Ordering::Relaxed);
     let model_dir = st
         .engine
         .download_model(
@@ -110,6 +176,7 @@ async fn ensure_model(window: tauri::WebviewWindow, params: EnsureModelParams) -
             params.repo_id,
             revision,
             cache_root.to_string_lossy().to_string(),
+            None,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -168,6 +235,7 @@ async fn infer(window: tauri::WebviewWindow, params: InferParams) -> Result<Resp
     };
 
     let job_id = next_job_id();
+    st.active_generate_job_id.store(job_id, Ordering::Relaxed);
     let gen = st
         .engine
         .generate(
@@ -175,6 +243,7 @@ async fn infer(window: tauri::WebviewWindow, params: InferParams) -> Result<Resp
             model.model_id,
             params.text,
             prompt_bytes,
+            None,
             params.seed.unwrap_or(42),
             params.max_steps.unwrap_or(10),
             params.guidance_scale.unwrap_or(2.0),
@@ -196,6 +265,161 @@ async fn stop_generate(app: tauri::AppHandle) -> Result<Option<u64>, String> {
         .map_err(|e| e.to_string())
 }
 
+fn default_model_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(app_data
+        .join("voxcpm")
+        .join("models")
+        .join("default")
+        .join(DEFAULT_REVISION))
+}
+
+fn emit_stage(app: &tauri::AppHandle, stage: &str, message: Option<String>) {
+    let payload = match message {
+        Some(message) => serde_json::json!({"stage": stage, "message": message}),
+        None => serde_json::json!({"stage": stage}),
+    };
+    let _ = app.emit("voxcpm:stage", payload);
+}
+
+#[tauri::command]
+async fn get_capabilities(app: tauri::AppHandle) -> Result<CapabilitiesResponse, String> {
+    let st = app.state::<AppState>();
+    let job_id = next_job_id();
+    eprintln!("get_capabilities: start job_id={job_id}");
+    let devices = tokio::time::timeout(Duration::from_secs(5), st.engine.list_devices(job_id))
+        .await
+        .map_err(|_| "list_devices timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    eprintln!("get_capabilities: ok job_id={job_id} devices={devices:?}");
+    Ok(CapabilitiesResponse {
+        devices,
+        mirror_default: false,
+        default_model: DefaultModelInfo {
+            repo_id: DEFAULT_REPO_ID.to_string(),
+            revision: DEFAULT_REVISION.to_string(),
+        },
+    })
+}
+
+#[tauri::command]
+async fn prepare_default_model(
+    app: tauri::AppHandle,
+    params: PrepareDefaultModelParams,
+) -> Result<PrepareDefaultModelResult, String> {
+    let st = app.state::<AppState>();
+
+    // Fast-path: already prepared for this device.
+    if let Some(p) = st.prepared_default.lock().unwrap().as_ref() {
+        if p.device_spec == params.device_spec {
+            emit_stage(&app, "ready", None);
+            return Ok(PrepareDefaultModelResult { model_loaded: true });
+        }
+    }
+
+    let cache_root = default_model_cache_dir(&app)?;
+    fs::create_dir_all(&cache_root).map_err(|e| e.to_string())?;
+
+    let endpoint = params.mirror.then(|| HF_MIRROR_ENDPOINT.to_string());
+
+    emit_stage(&app, "download", None);
+    let dl_job_id = next_job_id();
+    st.active_download_job_id
+        .store(dl_job_id, Ordering::Relaxed);
+    let model_dir = st
+        .engine
+        .download_model(
+            dl_job_id,
+            DEFAULT_REPO_ID.to_string(),
+            DEFAULT_REVISION.to_string(),
+            cache_root.to_string_lossy().to_string(),
+            endpoint,
+        )
+        .await
+        .map_err(|e| {
+            emit_stage(&app, "error", Some(e.to_string()));
+            e.to_string()
+        })?;
+
+    emit_stage(&app, "verify", None);
+    emit_stage(&app, "load", None);
+
+    let lm_job_id = next_job_id();
+    let model = st
+        .engine
+        .load_model(
+            lm_job_id,
+            model_dir.clone(),
+            params.device_spec.clone(),
+            None,
+            false,
+        )
+        .await
+        .map_err(|e| {
+            emit_stage(&app, "error", Some(e.to_string()));
+            e.to_string()
+        })?;
+
+    *st.prepared_default.lock().unwrap() = Some(PreparedDefault {
+        device_spec: params.device_spec,
+        model_dir,
+        model,
+    });
+    emit_stage(&app, "ready", None);
+    Ok(PrepareDefaultModelResult { model_loaded: true })
+}
+
+#[tauri::command]
+async fn generate_v1(app: tauri::AppHandle, params: GenerateV1Params) -> Result<Response, String> {
+    let st = app.state::<AppState>();
+
+    let prepared = st
+        .prepared_default
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "model not prepared: call prepare_default_model first".to_string())?;
+    if prepared.device_spec != params.device_spec {
+        return Err("model not prepared for this device_spec".to_string());
+    }
+
+    let target_text = params.target_text.trim().to_string();
+    if target_text.is_empty() {
+        return Err("target_text is empty".to_string());
+    }
+
+    let prompt_wav_bytes: Option<Vec<u8>> = match params.reference_audio_bytes {
+        Some(b) if !b.is_empty() => Some(b),
+        _ => match normalize_opt_str(params.reference_audio_path) {
+            None => None,
+            Some(p) => Some(fs::read(p).map_err(|e| e.to_string())?),
+        },
+    };
+    let prompt_text = normalize_opt_str(params.reference_text);
+    if prompt_wav_bytes.is_some() && prompt_text.is_none() {
+        return Err("reference_text is required when reference_audio_path is set".to_string());
+    }
+
+    let job_id = next_job_id();
+    st.active_generate_job_id.store(job_id, Ordering::Relaxed);
+    let gen = st
+        .engine
+        .generate(
+            job_id,
+            prepared.model.model_id,
+            target_text,
+            prompt_wav_bytes,
+            prompt_text,
+            params.seed.unwrap_or(42),
+            params.inference_steps,
+            params.cfg_value,
+            200,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Response::new(InvokeResponseBody::Raw(gen.wav_bytes)))
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -212,17 +436,28 @@ fn main() {
             let st = AppState {
                 engine,
                 models: Mutex::new(HashMap::new()),
+                prepared_default: Mutex::new(None),
+                active_download_job_id: AtomicU64::new(0),
+                active_generate_job_id: AtomicU64::new(0),
             };
             app.manage(st);
 
             // Forward engine events to the frontend.
-            let st = app_handle.state::<AppState>();
-            let mut rx = st.engine.subscribe();
+            let mut rx = {
+                let st = app_handle.state::<AppState>();
+                st.engine.subscribe()
+            };
+            let app_handle2 = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 while let Ok(ev) = rx.recv().await {
                     match ev {
                         Event::Engine(EngineEvent::DownloadProgress(p)) => {
-                            let _ = app_handle.emit(
+                            let st = app_handle2.state::<AppState>();
+                            let active = st.active_download_job_id.load(Ordering::Relaxed);
+                            if active != 0 && p.job_id != active {
+                                continue;
+                            }
+                            let _ = app_handle2.emit(
                                 "voxcpm:download",
                                 serde_json::json!({
                                     "stage": "downloading",
@@ -236,7 +471,12 @@ fn main() {
                             );
                         }
                         Event::Engine(EngineEvent::GenerateProgress(p)) => {
-                            let _ = app_handle.emit(
+                            let st = app_handle2.state::<AppState>();
+                            let active = st.active_generate_job_id.load(Ordering::Relaxed);
+                            if active != 0 && p.job_id != active {
+                                continue;
+                            }
+                            let _ = app_handle2.emit(
                                 "voxcpm:progress",
                                 serde_json::json!({
                                     "event": "progress",
@@ -253,7 +493,7 @@ fn main() {
                             );
                         }
                         Event::Engine(EngineEvent::Log { level: _, message }) => {
-                            let _ = app_handle.emit("voxcpm:log", message);
+                            let _ = app_handle2.emit("voxcpm:log", message);
                         }
                     }
                 }
@@ -261,7 +501,14 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![ensure_model, infer, stop_generate])
+        .invoke_handler(tauri::generate_handler![
+            ensure_model,
+            infer,
+            stop_generate,
+            get_capabilities,
+            prepare_default_model,
+            generate_v1
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

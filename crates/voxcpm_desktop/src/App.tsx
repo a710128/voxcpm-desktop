@@ -1,120 +1,390 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
-type ProgressPayload = {
-  event?: string
-  stage?: string
-  seq?: number
-  progress?: {
-    steps_done: number
-    step_samples: number
-    sample_rate: number
-    generated_samples: number
-    generated_ms: number
+import { Modal } from './components/Modal'
+import { getMirrorDefault, setMirrorDefault } from './lib/settings'
+import { LaunchScreen } from './screens/LaunchScreen'
+import { ProgressScreen } from './screens/ProgressScreen'
+import { WorkspaceScreen } from './screens/WorkspaceScreen'
+import type {
+  CapabilitiesResponse,
+  DeviceSpec,
+  DownloadEventPayload,
+  ProgressEventPayload,
+  StageEventPayload,
+  VoxcpmStage,
+} from './types'
+
+type AppMode = 'boot' | 'select_device' | 'downloading_loading' | 'workspace' | 'error'
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let t: number | undefined
+  try {
+    return await Promise.race([
+      p,
+      new Promise<T>((_, reject) => {
+        t = window.setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+      }),
+    ])
+  } finally {
+    if (t != null) window.clearTimeout(t)
   }
 }
 
-export default function App() {
-  const [repoId, setRepoId] = useState('openbmb/VoxCPM1.5')
-  const [revision, setRevision] = useState('main')
-  const [modelDir, setModelDir] = useState('')
-  const [text, setText] = useState('hello')
-  const [promptWav, setPromptWav] = useState('')
-  const [deviceSpec, setDeviceSpec] = useState<'cpu' | 'cuda:0' | 'metal:0'>('cpu')
-  const [progress, setProgress] = useState<ProgressPayload | null>(null)
-  const [download, setDownload] = useState<any>(null)
-  const [log, setLog] = useState<string>('')
+function pickDefaultDevice(devices: DeviceSpec[]): DeviceSpec {
+  // Prefer CUDA when available, else prefer Metal, else CPU.
+  const cuda = devices.find((d) => d.toLowerCase().startsWith('cuda:'))
+  if (cuda) return cuda
+  const metal = devices.find((d) => d.toLowerCase().startsWith('metal:'))
+  if (metal) return metal
+  return 'cpu'
+}
 
-  const generatedSec = useMemo(() => {
-    const ms = progress?.progress?.generated_ms
-    if (ms == null) return null
-    return (ms / 1000).toFixed(2)
-  }, [progress])
+export default function App() {
+  const [mode, setMode] = useState<AppMode>('boot')
+  const [caps, setCaps] = useState<CapabilitiesResponse | null>(null)
+  const [deviceSpec, setDeviceSpec] = useState<DeviceSpec>('cpu')
+
+  const [mirrorDefault, setMirrorDefaultState] = useState<boolean>(() => getMirrorDefault())
+  const [stage, setStage] = useState<VoxcpmStage | string | null>(null)
+  const [stageMessage, setStageMessage] = useState<string | null>(null)
+  const [download, setDownload] = useState<DownloadEventPayload | null>(null)
+  const [progress, setProgress] = useState<ProgressEventPayload | null>(null)
+  const [log, setLog] = useState<string>('')
+  const pendingLogRef = useRef<string>('')
+  const logFlushRafRef = useRef<number | null>(null)
+
+  const MAX_LOG_CHARS = 200_000
+
+  const [referenceAudioName, setReferenceAudioName] = useState<string | null>(null)
+  const [referenceAudioBytes, setReferenceAudioBytes] = useState<Uint8Array | null>(null)
+  const [referenceText, setReferenceText] = useState<string>('')
+  const [targetText, setTargetText] = useState<string>('')
+  const [cfgValue, setCfgValue] = useState<number>(2.0)
+  const [inferenceSteps, setInferenceSteps] = useState<number>(10)
+
+  const [isGenerating, setIsGenerating] = useState<boolean>(false)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const audioUrlRef = useRef<string | null>(null)
+
+  const [showDownloadError, setShowDownloadError] = useState<null | { message: string }>(null)
+  const [bootInfo, setBootInfo] = useState<string>('')
 
   useEffect(() => {
-    const unlistenP = listen<ProgressPayload>('voxcpm:progress', (e) => {
+    function scheduleLogFlush() {
+      if (logFlushRafRef.current != null) return
+      logFlushRafRef.current = window.requestAnimationFrame(() => {
+        logFlushRafRef.current = null
+        const pending = pendingLogRef.current
+        if (pending === '') return
+        pendingLogRef.current = ''
+        setLog((prev) => {
+          let next = prev + pending
+          if (next.length > MAX_LOG_CHARS) next = next.slice(next.length - MAX_LOG_CHARS)
+          return next
+        })
+      })
+    }
+
+    const unlistenStage = listen<StageEventPayload>('voxcpm:stage', (e) => {
+      setStage(e.payload.stage)
+      setStageMessage(e.payload.message ?? null)
+      if (e.payload.stage === 'ready') {
+        // Auto transition to workspace.
+        setMode('workspace')
+      }
+      if (e.payload.stage === 'error') {
+        setShowDownloadError({ message: e.payload.message ?? 'unknown error' })
+      }
+    })
+
+    const unlistenP = listen<ProgressEventPayload>('voxcpm:progress', (e) => {
       setProgress(e.payload)
     })
-    const unlistenD = listen<any>('voxcpm:download', (e) => {
+    const unlistenD = listen<DownloadEventPayload>('voxcpm:download', (e) => {
       setDownload(e.payload)
     })
     const unlistenL = listen<string>('voxcpm:log', (e) => {
-      setLog((prev) => prev + e.payload)
+      pendingLogRef.current += e.payload
+      scheduleLogFlush()
     })
+
     return () => {
+      unlistenStage.then((f) => f()).catch(() => {})
       unlistenP.then((f) => f()).catch(() => {})
       unlistenD.then((f) => f()).catch(() => {})
       unlistenL.then((f) => f()).catch(() => {})
+
+      if (logFlushRafRef.current != null) {
+        window.cancelAnimationFrame(logFlushRafRef.current)
+        logFlushRafRef.current = null
+      }
     }
   }, [])
 
-  async function downloadModel() {
+  useEffect(() => {
+    // Boot: query capabilities.
+    if (mode !== 'boot') return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const tauriInjected = typeof (window as any).__TAURI__ !== 'undefined'
+        setBootInfo(`tauriInjected=${tauriInjected}`)
+        // Give the webview a brief moment to finish injection/initialization.
+        await sleep(50)
+        const c = await withTimeout(
+          invoke<CapabilitiesResponse>('get_capabilities'),
+          8000,
+          'get_capabilities'
+        )
+        if (cancelled) return
+        setCaps(c)
+        setDeviceSpec(pickDefaultDevice(c.devices))
+        setMode('select_device')
+      } catch (e) {
+        if (cancelled) return
+        setMode('error')
+        setStageMessage(String(e))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [mode])
+
+  useEffect(() => {
+    // Keep localStorage in sync.
+    setMirrorDefault(mirrorDefault)
+  }, [mirrorDefault])
+
+  async function startPrepare(mirror: boolean, deviceOverride?: DeviceSpec) {
     setLog('')
+    pendingLogRef.current = ''
+    if (logFlushRafRef.current != null) {
+      window.cancelAnimationFrame(logFlushRafRef.current)
+      logFlushRafRef.current = null
+    }
     setDownload(null)
-    const dir = (await invoke('ensure_model', {
-      repoId,
-      revision,
-    })) as string
-    setModelDir(dir)
-    setLog((prev) => prev + `Downloaded model to: ${dir}\n`)
-  }
-
-  async function runInfer() {
-    setLog('')
     setProgress(null)
-    const wavBytes = (await invoke('infer', {
-      modelDir,
-      text,
-      promptWav: promptWav.trim() === '' ? null : promptWav,
-      deviceSpec,
-    })) as Uint8Array
+    setStage(null)
+    setStageMessage(null)
+    setShowDownloadError(null)
+    setMode('downloading_loading')
 
-    // Save as Blob URL so the user can play it.
-    const blob = new Blob([wavBytes], { type: 'audio/wav' })
-    const url = URL.createObjectURL(blob)
-    setLog((prev) => prev + `\nDone. WAV bytes=${wavBytes.byteLength} url=${url}\n`)
+    const effectiveDevice = deviceOverride ?? deviceSpec
+    if (deviceOverride) setDeviceSpec(deviceOverride)
+
+    try {
+      await invoke('prepare_default_model', { deviceSpec: effectiveDevice, mirror })
+      // Transition happens via voxcpm:stage ready.
+    } catch (e) {
+      setShowDownloadError({ message: String(e) })
+    }
   }
 
-  return (
-    <main>
-      <h1>VoxCPM Desktop</h1>
+  async function onGenerate() {
+    setIsGenerating(true)
+    setProgress(null)
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current)
+      audioUrlRef.current = null
+    }
+    setAudioUrl(null)
+    try {
+      const wavBytes = await invoke<Uint8Array>('generate_v1', {
+        deviceSpec,
+        targetText,
+        referenceAudioBytes: referenceAudioBytes ? Array.from(referenceAudioBytes) : null,
+        referenceText: referenceText.trim() === '' ? null : referenceText,
+        cfgValue,
+        inferenceSteps,
+      })
+      // Tauri returns an Uint8Array-like object (typing may vary across TS libdefs).
+      const blob = new Blob([wavBytes as any], { type: 'audio/wav' })
+      const url = URL.createObjectURL(blob)
+      audioUrlRef.current = url
+      setAudioUrl(url)
+    } catch (e) {
+      setLog((prev) => prev + `\nGenerate failed: ${String(e)}\n`)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
 
-      <label>Hugging Face repo</label>
-      <input value={repoId} onChange={(e) => setRepoId(e.target.value)} />
+  async function onStop() {
+    try {
+      await invoke('stop_generate')
+    } catch {
+      // ignore
+    }
+    setIsGenerating(false)
+    setProgress(null)
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current)
+      audioUrlRef.current = null
+    }
+    setAudioUrl(null)
+  }
 
-      <label>Revision</label>
-      <input value={revision} onChange={(e) => setRevision(e.target.value)} />
+  const content = useMemo(() => {
+    if (mode === 'boot') {
+      return (
+        <div className="container">
+          <div className="topbar">
+            <div className="topbarTitle">VoxCPM Desktop</div>
+          </div>
+          <div className="card" style={{ marginTop: 24 }}>
+            <div className="cardBody">
+              <div>Booting…</div>
+              <div className="muted small" style={{ marginTop: 8 }}>
+                {bootInfo}
+              </div>
+            </div>
+          </div>
+        </div>
+      )
+    }
 
-      <button onClick={downloadModel}>Download Model</button>
+    if (mode === 'error') {
+      return (
+        <div className="container">
+          <div className="topbar">
+            <div className="topbarTitle">VoxCPM Desktop</div>
+          </div>
+          <div className="card" style={{ marginTop: 24 }}>
+            <div className="cardHeader">
+              <div>
+                <div className="h2">Error</div>
+                <div className="muted">Failed to boot</div>
+              </div>
+            </div>
+            <div className="cardBody">
+              <pre className="pre">{stageMessage ?? 'unknown error'}</pre>
+            </div>
+            <div className="cardFooter">
+              <button
+                className="btn btnPrimary"
+                onClick={() => {
+                  setStageMessage(null)
+                  setMode('boot')
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      )
+    }
 
-      <h2>Download</h2>
-      <pre>{JSON.stringify(download, null, 2)}</pre>
+    if (caps == null) {
+      return null
+    }
 
-      <label>Model directory</label>
-      <input value={modelDir} onChange={(e) => setModelDir(e.target.value)} placeholder="/path/to/model_dir" />
+    if (mode === 'select_device') {
+      return (
+        <LaunchScreen
+          caps={caps}
+          deviceSpec={deviceSpec}
+          mirrorDefault={mirrorDefault}
+          onChangeDeviceSpec={setDeviceSpec}
+          onToggleMirrorDefault={setMirrorDefaultState}
+          onStartLoading={() => startPrepare(mirrorDefault)}
+        />
+      )
+    }
 
-      <label>Text</label>
-      <textarea rows={4} value={text} onChange={(e) => setText(e.target.value)} />
+    if (mode === 'downloading_loading') {
+      return (
+        <>
+          <ProgressScreen
+            stage={stage}
+            stageMessage={stageMessage}
+            download={download}
+            log={log}
+            onBack={() => setMode('select_device')}
+          />
+          {showDownloadError ? (
+            <Modal
+              title="Download failed"
+              onClose={() => setShowDownloadError(null)}
+              footer={
+                <>
+                  <button className="btn btnGhost" onClick={() => setMode('select_device')}>
+                    Back
+                  </button>
+                  <button className="btn" onClick={() => startPrepare(false)}>
+                    Retry official
+                  </button>
+                  <button className="btn btnPrimary" onClick={() => startPrepare(true)}>
+                    Retry with mirror
+                  </button>
+                  {deviceSpec !== 'cpu' ? (
+                    <button className="btn" onClick={() => startPrepare(mirrorDefault, 'cpu')}>
+                      Switch to CPU
+                    </button>
+                  ) : null}
+                </>
+              }
+            >
+              <div className="muted">{showDownloadError.message}</div>
+            </Modal>
+          ) : null}
+        </>
+      )
+    }
 
-      <label>Prompt wav (optional)</label>
-      <input value={promptWav} onChange={(e) => setPromptWav(e.target.value)} placeholder="/path/to/prompt.wav or empty" />
+    // workspace
+    return (
+      <WorkspaceScreen
+        deviceSpec={deviceSpec}
+        referenceAudioName={referenceAudioName}
+        referenceText={referenceText}
+        targetText={targetText}
+        cfgValue={cfgValue}
+        inferenceSteps={inferenceSteps}
+        progress={progress}
+        audioUrl={audioUrl}
+        log={log}
+        isGenerating={isGenerating}
+        onPickReferenceAudio={async (file) => {
+          setReferenceAudioName(file.name)
+          const buf = await file.arrayBuffer()
+          setReferenceAudioBytes(new Uint8Array(buf))
+        }}
+        onChangeReferenceText={setReferenceText}
+        onChangeTargetText={setTargetText}
+        onChangeCfgValue={setCfgValue}
+        onChangeInferenceSteps={setInferenceSteps}
+        onGenerate={onGenerate}
+        onStop={onStop}
+      />
+    )
+  }, [
+    audioUrl,
+    caps,
+    cfgValue,
+    deviceSpec,
+    download,
+    inferenceSteps,
+    isGenerating,
+    log,
+    mirrorDefault,
+    mode,
+    progress,
+    referenceAudioName,
+    referenceText,
+    showDownloadError,
+    stage,
+    stageMessage,
+    targetText,
+  ])
 
-      <label>Device</label>
-      <select value={deviceSpec} onChange={(e) => setDeviceSpec(e.target.value as any)}>
-        <option value="cpu">cpu</option>
-        <option value="cuda:0">cuda:0</option>
-        <option value="metal:0">metal:0</option>
-      </select>
-
-      <button onClick={runInfer} disabled={!modelDir || !text}>Generate</button>
-
-      <h2>Progress</h2>
-      <pre>{JSON.stringify(progress, null, 2)}</pre>
-      {generatedSec != null ? <div>Generated seconds (approx): {generatedSec}</div> : null}
-
-      <h2>Log</h2>
-      <pre>{log}</pre>
-    </main>
-  )
+  return content
 }

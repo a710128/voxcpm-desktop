@@ -9,8 +9,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, oneshot};
 
 use voxcpm_ipc::{
-    encode_frame, try_decode_frame, EngineError, EngineEvent, EngineOp, EngineResponse, EngineToHost,
-    HostToEngine, JobId, DEFAULT_MAX_FRAME_LEN,
+    encode_frame, try_decode_frame, EngineError, EngineEvent, EngineOp, EngineResponse,
+    EngineToHost, HostToEngine, JobId, DEFAULT_MAX_FRAME_LEN,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -54,7 +54,9 @@ struct Pending {
 }
 
 pub struct EngineSdk {
-    write: tokio::sync::Mutex<Box<dyn Fn(Vec<u8>) -> tokio::task::JoinHandle<Result<(), SdkError>> + Send + Sync>>,
+    write: tokio::sync::Mutex<
+        Box<dyn Fn(Vec<u8>) -> tokio::task::JoinHandle<Result<(), SdkError>> + Send + Sync>,
+    >,
     pending: Arc<Mutex<HashMap<JobId, Pending>>>,
     events: broadcast::Sender<Event>,
     drop_kill: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
@@ -63,12 +65,23 @@ pub struct EngineSdk {
 impl EngineSdk {
     pub async fn spawn(engine_bin: impl AsRef<Path>) -> Result<Self, SdkError> {
         let mut cmd = Command::new(engine_bin.as_ref());
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| SdkError::Io(e.to_string()))?;
 
-        let stdin = child.stdin.take().ok_or_else(|| SdkError::Io("missing stdin".into()))?;
-        let stdout = child.stdout.take().ok_or_else(|| SdkError::Io("missing stdout".into()))?;
-        let stderr = child.stderr.take().ok_or_else(|| SdkError::Io("missing stderr".into()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| SdkError::Io("missing stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| SdkError::Io("missing stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| SdkError::Io("missing stderr".into()))?;
 
         Self::from_stdio(child, stdin, stdout, stderr).await
     }
@@ -85,7 +98,9 @@ impl EngineSdk {
 
         // Writer closure: always non-blocking for caller (does async write on a task).
         let stdin = Arc::new(tokio::sync::Mutex::new(stdin));
-        let write_fn: Box<dyn Fn(Vec<u8>) -> tokio::task::JoinHandle<Result<(), SdkError>> + Send + Sync> = {
+        let write_fn: Box<
+            dyn Fn(Vec<u8>) -> tokio::task::JoinHandle<Result<(), SdkError>> + Send + Sync,
+        > = {
             let stdin = stdin.clone();
             Box::new(move |bytes: Vec<u8>| {
                 let stdin = stdin.clone();
@@ -132,7 +147,10 @@ impl EngineSdk {
                         Ok(n) => {
                             buf.extend_from_slice(&tmp[..n]);
                             loop {
-                                let msg = match try_decode_frame::<EngineToHost>(&mut buf, DEFAULT_MAX_FRAME_LEN) {
+                                let msg = match try_decode_frame::<EngineToHost>(
+                                    &mut buf,
+                                    DEFAULT_MAX_FRAME_LEN,
+                                ) {
                                     Ok(Some(m)) => m,
                                     Ok(None) => break,
                                     Err(e) => {
@@ -158,13 +176,15 @@ impl EngineSdk {
                                             EngineResponse::Generate(r) => r.job_id,
                                             EngineResponse::StopGenerate(r) => r.job_id,
                                             EngineResponse::Exit(r) => r.job_id,
+                                            EngineResponse::ListDevices(r) => r.job_id,
                                         };
                                         if let Some(p) = pending.lock().unwrap().remove(&job_id) {
                                             let _ = p.tx.send(Ok(resp));
                                         }
                                     }
                                     EngineToHost::Error(err) => {
-                                        if let Some(p) = pending.lock().unwrap().remove(&err.job_id) {
+                                        if let Some(p) = pending.lock().unwrap().remove(&err.job_id)
+                                        {
                                             let _ = p.tx.send(Err(err));
                                         }
                                     }
@@ -218,7 +238,12 @@ impl EngineSdk {
         self.events.subscribe()
     }
 
-    async fn call(&self, job_id: JobId, op: EngineOp, msg: HostToEngine) -> Result<EngineResponse, SdkError> {
+    async fn call(
+        &self,
+        job_id: JobId,
+        op: EngineOp,
+        msg: HostToEngine,
+    ) -> Result<EngineResponse, SdkError> {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().unwrap();
@@ -240,7 +265,10 @@ impl EngineSdk {
                 if e.code == "busy" {
                     Err(SdkError::Busy)
                 } else {
-                    Err(SdkError::Engine { code: e.code, message: e.message })
+                    Err(SdkError::Engine {
+                        code: e.code,
+                        message: e.message,
+                    })
                 }
             }
         }
@@ -252,6 +280,7 @@ impl EngineSdk {
         repo_id: String,
         revision: String,
         cache_dir: String,
+        endpoint: Option<String>,
     ) -> Result<String, SdkError> {
         let resp = self
             .call(
@@ -262,6 +291,7 @@ impl EngineSdk {
                     repo_id,
                     revision,
                     cache_dir,
+                    endpoint,
                 }),
             )
             .await?;
@@ -308,6 +338,7 @@ impl EngineSdk {
         model_id: String,
         text: String,
         prompt_wav: Option<Vec<u8>>,
+        prompt_text: Option<String>,
         seed: u64,
         max_steps: usize,
         guidance_scale: f64,
@@ -322,6 +353,7 @@ impl EngineSdk {
                     model_id,
                     text,
                     prompt_wav,
+                    prompt_text,
                     seed,
                     max_steps,
                     guidance_scale,
@@ -356,9 +388,27 @@ impl EngineSdk {
 
     pub async fn exit(&self, job_id: JobId) -> Result<(), SdkError> {
         let _ = self
-            .call(job_id, EngineOp::Exit, HostToEngine::Exit(voxcpm_ipc::ExitRequest { job_id }))
+            .call(
+                job_id,
+                EngineOp::Exit,
+                HostToEngine::Exit(voxcpm_ipc::ExitRequest { job_id }),
+            )
             .await?;
         Ok(())
+    }
+
+    pub async fn list_devices(&self, job_id: JobId) -> Result<Vec<String>, SdkError> {
+        let resp = self
+            .call(
+                job_id,
+                EngineOp::ListDevices,
+                HostToEngine::ListDevices(voxcpm_ipc::ListDevicesRequest { job_id }),
+            )
+            .await?;
+        match resp {
+            EngineResponse::ListDevices(r) => Ok(r.devices),
+            _ => Err(SdkError::Ipc("unexpected response".into())),
+        }
     }
 }
 
@@ -379,18 +429,27 @@ mod tauri_sidecar {
     use tauri_plugin_shell::ShellExt;
 
     impl EngineSdk {
-        pub async fn spawn_tauri_sidecar(app: &tauri::AppHandle, sidecar: &str) -> Result<Self, SdkError> {
+        pub async fn spawn_tauri_sidecar(
+            app: &tauri::AppHandle,
+            sidecar: &str,
+        ) -> Result<Self, SdkError> {
             let cmd = app
                 .shell()
                 .sidecar(sidecar)
                 .map_err(|e| SdkError::Io(e.to_string()))?;
-            let (mut rx, child) = cmd.spawn().map_err(|e| SdkError::Io(e.to_string()))?;
+            // IMPORTANT: our IPC uses binary frames on stdout, so we must enable raw output.
+            let (mut rx, child) = cmd
+                .set_raw_out(true)
+                .spawn()
+                .map_err(|e| SdkError::Io(e.to_string()))?;
 
             let (events_tx, _events_rx) = broadcast::channel(1024);
             let pending: Arc<Mutex<HashMap<JobId, Pending>>> = Arc::new(Mutex::new(HashMap::new()));
             let child_arc: Arc<Mutex<Option<CommandChild>>> = Arc::new(Mutex::new(Some(child)));
 
-            let write_fn: Box<dyn Fn(Vec<u8>) -> tokio::task::JoinHandle<Result<(), SdkError>> + Send + Sync> = {
+            let write_fn: Box<
+                dyn Fn(Vec<u8>) -> tokio::task::JoinHandle<Result<(), SdkError>> + Send + Sync,
+            > = {
                 let child_arc = child_arc.clone();
                 Box::new(move |bytes: Vec<u8>| {
                     let child_arc = child_arc.clone();
@@ -398,7 +457,9 @@ mod tauri_sidecar {
                         tokio::task::spawn_blocking(move || {
                             let mut g = child_arc.lock().unwrap();
                             let child = g.as_mut().ok_or(SdkError::EngineTerminated)?;
-                            child.write(&bytes).map_err(|e| SdkError::Io(e.to_string()))?;
+                            child
+                                .write(&bytes)
+                                .map_err(|e| SdkError::Io(e.to_string()))?;
                             Ok(())
                         })
                         .await
@@ -435,14 +496,18 @@ mod tauri_sidecar {
                             CommandEvent::Stdout(bytes) => {
                                 buf.extend_from_slice(&bytes);
                                 loop {
-                                    let msg = match try_decode_frame::<EngineToHost>(&mut buf, DEFAULT_MAX_FRAME_LEN) {
+                                    let msg = match try_decode_frame::<EngineToHost>(
+                                        &mut buf,
+                                        DEFAULT_MAX_FRAME_LEN,
+                                    ) {
                                         Ok(Some(m)) => m,
                                         Ok(None) => break,
                                         Err(e) => {
-                                            let _ = events_tx.send(Event::Engine(EngineEvent::Log {
-                                                level: voxcpm_ipc::LogLevel::Error,
-                                                message: format!("ipc decode error: {e}"),
-                                            }));
+                                            let _ =
+                                                events_tx.send(Event::Engine(EngineEvent::Log {
+                                                    level: voxcpm_ipc::LogLevel::Error,
+                                                    message: format!("ipc decode error: {e}"),
+                                                }));
                                             break;
                                         }
                                     };
@@ -458,13 +523,17 @@ mod tauri_sidecar {
                                                 EngineResponse::Generate(r) => r.job_id,
                                                 EngineResponse::StopGenerate(r) => r.job_id,
                                                 EngineResponse::Exit(r) => r.job_id,
+                                                EngineResponse::ListDevices(r) => r.job_id,
                                             };
-                                            if let Some(p) = pending.lock().unwrap().remove(&job_id) {
+                                            if let Some(p) = pending.lock().unwrap().remove(&job_id)
+                                            {
                                                 let _ = p.tx.send(Ok(resp));
                                             }
                                         }
                                         EngineToHost::Error(err) => {
-                                            if let Some(p) = pending.lock().unwrap().remove(&err.job_id) {
+                                            if let Some(p) =
+                                                pending.lock().unwrap().remove(&err.job_id)
+                                            {
                                                 let _ = p.tx.send(Err(err));
                                             }
                                         }

@@ -59,6 +59,7 @@ pub enum HostToEngine {
     Generate(GenerateRequest),
     StopGenerate(StopGenerateRequest),
     Exit(ExitRequest),
+    ListDevices(ListDevicesRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +77,7 @@ pub enum EngineOp {
     Generate,
     StopGenerate,
     Exit,
+    ListDevices,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +109,8 @@ pub struct DownloadModelRequest {
     pub repo_id: String,
     pub revision: String,
     pub cache_dir: String,
+    /// Optional HF endpoint override, e.g. https://hf-mirror.com
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,10 +159,23 @@ pub struct GenerateRequest {
     pub model_id: String,
     pub text: String,
     pub prompt_wav: Option<Vec<u8>>,
+    /// Reference text for prompt_wav (if provided).
+    pub prompt_text: Option<String>,
     pub seed: u64,
     pub max_steps: usize,
     pub guidance_scale: f64,
     pub emit_every_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListDevicesRequest {
+    pub job_id: JobId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListDevicesResponse {
+    pub job_id: JobId,
+    pub devices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,4 +225,5 @@ pub enum EngineResponse {
     Generate(GenerateResponse),
     StopGenerate(StopGenerateResponse),
     Exit(ExitResponse),
+    ListDevices(ListDevicesResponse),
 }

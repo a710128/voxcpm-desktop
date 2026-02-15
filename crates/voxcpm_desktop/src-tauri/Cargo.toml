@@ -11,6 +11,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 voxcpm_engine_sdk = { path = "../../voxcpm_engine_sdk", features = ["tauri-shell"] }
 voxcpm_ipc = { path = "../../voxcpm_ipc" }

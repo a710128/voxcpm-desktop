@@ -58,7 +58,9 @@ async fn check_local_cache_and_emit(out_tx: &OutTx, job_id: JobId, root: &PathBu
 
     let mut ok = true;
     for (name, done) in req_files {
-        let exists = tokio::fs::try_exists(&root.join(name)).await.unwrap_or(false);
+        let exists = tokio::fs::try_exists(&root.join(name))
+            .await
+            .unwrap_or(false);
         ok &= exists;
         let _ = out_tx
             .send(EngineToHost::Event(EngineEvent::DownloadProgress(
@@ -160,7 +162,9 @@ async fn download_one(
 
     let local_path = local_root.join(file_path);
     if let Some(parent) = local_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     let etag_path = local_path.with_file_name(format!(
@@ -172,7 +176,9 @@ async fn download_one(
     ));
 
     if tokio::fs::try_exists(&local_path).await.unwrap_or(false) {
-        if let (Some(server), Ok(local)) = (etag.as_deref(), tokio::fs::read_to_string(&etag_path).await) {
+        if let (Some(server), Ok(local)) =
+            (etag.as_deref(), tokio::fs::read_to_string(&etag_path).await)
+        {
             if local.trim() == server {
                 let _ = out_tx.try_send(EngineToHost::Event(EngineEvent::DownloadProgress(
                     DownloadProgress {
@@ -233,7 +239,9 @@ async fn download_one(
             .and_then(|s| s.to_str())
             .unwrap_or("file")
     ));
-    let mut f = tokio::fs::File::create(&tmp_path).await.map_err(|e| e.to_string())?;
+    let mut f = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut stream = resp.bytes_stream();
     use futures_util::StreamExt;
@@ -268,10 +276,14 @@ async fn download_one(
     }
     f.flush().await.map_err(|e| e.to_string())?;
     drop(f);
-    tokio::fs::rename(&tmp_path, &local_path).await.map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp_path, &local_path)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if let Some(etag) = etag.as_deref() {
-        tokio::fs::write(&etag_path, etag).await.map_err(|e| e.to_string())?;
+        tokio::fs::write(&etag_path, etag)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     let _ = out_tx.try_send(EngineToHost::Event(EngineEvent::DownloadProgress(
@@ -310,14 +322,29 @@ pub(crate) async fn handle_download_model(
 
     let cache_root = PathBuf::from(&req.cache_dir);
     if let Err(e) = tokio::fs::create_dir_all(&cache_root).await {
-        send_error(&out_tx, job_id, EngineOp::DownloadModel, "io", e.to_string(), true).await;
+        send_error(
+            &out_tx,
+            job_id,
+            EngineOp::DownloadModel,
+            "io",
+            e.to_string(),
+            true,
+        )
+        .await;
         return Ok(());
     }
 
-    let endpoint = std::env::var("HF_ENDPOINT")
-        .ok()
+    let endpoint = req
+        .endpoint
+        .as_deref()
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("HF_ENDPOINT")
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| DEFAULT_HF_ENDPOINT.to_string());
     let token = std::env::var("HF_TOKEN")
         .ok()
