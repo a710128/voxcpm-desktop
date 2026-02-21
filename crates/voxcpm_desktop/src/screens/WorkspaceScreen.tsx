@@ -56,14 +56,7 @@ export function WorkspaceScreen(props: {
   }, [canGenerate, props.isGenerating, props.onGenerate, props.onStop])
 
   return (
-    <div className="container">
-      <div className="topbar">
-        <div className="topbarTitle">Workspace</div>
-        <div className="topbarRight">
-          <div className="chip">Device: {props.deviceSpec}</div>
-        </div>
-      </div>
-
+    <div className="container" aria-busy={props.isGenerating}>
       <div className="grid2">
         <div className="stack">
           <div className="card">
@@ -72,6 +65,7 @@ export function WorkspaceScreen(props: {
                 <div className="h2">Reference</div>
                 <div className="muted">Optional voice prompt</div>
               </div>
+              <div className="chip">Device: {props.deviceSpec}</div>
             </div>
             <div className="cardBody">
               <label className="label" htmlFor="referenceAudio">
@@ -161,10 +155,22 @@ export function WorkspaceScreen(props: {
               </div>
             </div>
             <div className="cardFooter">
-              <button className="btn btnPrimary" onClick={props.onGenerate} disabled={!canGenerate}>
-                Generate
+              <button
+                className="btn btnPrimary"
+                onClick={props.onGenerate}
+                disabled={!canGenerate}
+                title="Cmd/Ctrl+Enter"
+                aria-keyshortcuts="Control+Enter Meta+Enter"
+              >
+                {props.isGenerating ? 'Generating…' : 'Generate'}
               </button>
-              <button className="btn btnDanger" onClick={props.onStop} disabled={!props.isGenerating}>
+              <button
+                className="btn btnDanger"
+                onClick={props.onStop}
+                disabled={!props.isGenerating}
+                title="Esc"
+                aria-keyshortcuts="Escape"
+              >
                 Stop
               </button>
             </div>
@@ -186,16 +192,18 @@ export function WorkspaceScreen(props: {
                   {generatedSec != null ? `~${generatedSec.toFixed(2)}s` : props.isGenerating ? '…' : ''}
                 </div>
               </div>
-              <div className="timeRuler" role="progressbar" aria-label="Generated seconds">
-                <div
-                  className="timeFill"
-                  style={{
-                    width:
-                      generatedSec == null
-                        ? '0%'
-                        : `${Math.min(100, Math.max(0, (generatedSec / 10) * 100))}%`,
-                  }}
-                />
+              <div
+                className={props.isGenerating && generatedSec == null ? 'timeRuler indeterminate' : 'timeRuler'}
+                role="progressbar"
+                aria-label="Generated seconds"
+                aria-valuetext={props.isGenerating && generatedSec == null ? 'Generating' : undefined}
+              >
+                {generatedSec == null ? null : (
+                  <div
+                    className="timeFill"
+                    style={{ width: `${Math.min(100, Math.max(0, (generatedSec / 10) * 100))}%` }}
+                  />
+                )}
               </div>
               <div className="muted small">(visual scale: 10s = 100%)</div>
             </div>
@@ -208,7 +216,9 @@ export function WorkspaceScreen(props: {
 
             <div className="field">
               <div className="label">Log</div>
-              <pre className="pre log">{props.log}</pre>
+              <pre className="pre log" tabIndex={0} role="region" aria-label="Engine log">
+                {props.log}
+              </pre>
             </div>
           </div>
         </div>

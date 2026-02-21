@@ -10,16 +10,14 @@ export function ProgressScreen(props: {
   onBack: () => void
 }) {
   const percent = props.download?.stage === 'downloading' ? props.download.percent : null
+  const downloadIndeterminate = props.download?.stage === 'downloading' && percent == null
 
   return (
-    <div className="container">
-      <div className="topbar">
-        <div className="topbarTitle">Loading model…</div>
-        <div className="topbarRight">
-          <button className="btn btnGhost" onClick={props.onBack}>
-            Back
-          </button>
-        </div>
+    <div className="container containerNarrow">
+      <div className="topBar">
+        <button className="btn btnGhost" onClick={props.onBack}>
+          Back
+        </button>
       </div>
 
       <div className="grid2">
@@ -27,7 +25,9 @@ export function ProgressScreen(props: {
           <div className="cardHeader">
             <div>
               <div className="h2">Progress</div>
-              <div className="muted">{props.stageMessage ?? ' '}</div>
+              <div className="muted" aria-live="polite">
+                {props.stageMessage ?? ' '}
+              </div>
             </div>
           </div>
           <div className="cardBody">
@@ -39,17 +39,17 @@ export function ProgressScreen(props: {
                 <div className="muted">{percent != null ? `${percent.toFixed(1)}%` : ''}</div>
               </div>
               <div
-                className="progressBar"
+                className={downloadIndeterminate ? 'progressBar indeterminate' : 'progressBar'}
                 role="progressbar"
                 aria-label="Download progress"
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={percent == null ? undefined : Math.min(100, Math.max(0, percent))}
+                aria-valuetext={downloadIndeterminate ? 'Downloading' : undefined}
               >
-                <div
-                  className="progressFill"
-                  style={{ width: percent == null ? '0%' : `${Math.min(100, Math.max(0, percent))}%` }}
-                />
+                {percent == null ? null : (
+                  <div className="progressFill" style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
+                )}
               </div>
               {props.download?.stage === 'downloading' ? (
                 <div className="muted small">{props.download.file}</div>
@@ -81,7 +81,9 @@ export function ProgressScreen(props: {
             </div>
           </div>
           <div className="cardBody">
-            <pre className="pre log">{props.log}</pre>
+            <pre className="pre log" tabIndex={0} role="region" aria-label="Engine log">
+              {props.log}
+            </pre>
           </div>
         </div>
       </div>

@@ -62,6 +62,7 @@ struct AppState {
 #[derive(Debug, Clone)]
 struct PreparedDefault {
     device_spec: String,
+    repo_id: String,
     model_dir: String,
     model: ModelHandle,
 }
@@ -85,6 +86,8 @@ struct DefaultModelInfo {
 #[serde(rename_all = "camelCase")]
 struct PrepareDefaultModelParams {
     device_spec: String,
+    #[serde(default)]
+    repo_id: Option<String>,
     #[serde(default)]
     mirror: bool,
 }
@@ -265,12 +268,14 @@ async fn stop_generate(app: tauri::AppHandle) -> Result<Option<u64>, String> {
         .map_err(|e| e.to_string())
 }
 
-fn default_model_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn default_model_cache_dir(app: &tauri::AppHandle, repo_id: &str) -> Result<PathBuf, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let repo_key = repo_id.replace('/', "__");
     Ok(app_data
         .join("voxcpm")
         .join("models")
         .join("default")
+        .join(repo_key)
         .join(DEFAULT_REVISION))
 }
 
@@ -309,15 +314,17 @@ async fn prepare_default_model(
 ) -> Result<PrepareDefaultModelResult, String> {
     let st = app.state::<AppState>();
 
+    let repo_id = normalize_opt_str(params.repo_id).unwrap_or_else(|| DEFAULT_REPO_ID.to_string());
+
     // Fast-path: already prepared for this device.
     if let Some(p) = st.prepared_default.lock().unwrap().as_ref() {
-        if p.device_spec == params.device_spec {
+        if p.device_spec == params.device_spec && p.repo_id == repo_id {
             emit_stage(&app, "ready", None);
             return Ok(PrepareDefaultModelResult { model_loaded: true });
         }
     }
 
-    let cache_root = default_model_cache_dir(&app)?;
+    let cache_root = default_model_cache_dir(&app, &repo_id)?;
     fs::create_dir_all(&cache_root).map_err(|e| e.to_string())?;
 
     let endpoint = params.mirror.then(|| HF_MIRROR_ENDPOINT.to_string());
@@ -330,7 +337,7 @@ async fn prepare_default_model(
         .engine
         .download_model(
             dl_job_id,
-            DEFAULT_REPO_ID.to_string(),
+            repo_id.clone(),
             DEFAULT_REVISION.to_string(),
             cache_root.to_string_lossy().to_string(),
             endpoint,
@@ -362,6 +369,7 @@ async fn prepare_default_model(
 
     *st.prepared_default.lock().unwrap() = Some(PreparedDefault {
         device_spec: params.device_spec,
+        repo_id,
         model_dir,
         model,
     });

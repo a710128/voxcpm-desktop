@@ -4,7 +4,17 @@ import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
 import { Modal } from './components/Modal'
-import { getMirrorDefault, setMirrorDefault } from './lib/settings'
+import {
+  getLaunchCustomRepoId,
+  getLaunchDeviceSpec,
+  getLaunchMirror,
+  getLaunchModelSource,
+  setLaunchCustomRepoId,
+  setLaunchDeviceSpec,
+  setLaunchMirror,
+  setLaunchModelSource,
+  type LaunchModelSource,
+} from './lib/settings'
 import { LaunchScreen } from './screens/LaunchScreen'
 import { ProgressScreen } from './screens/ProgressScreen'
 import { WorkspaceScreen } from './screens/WorkspaceScreen'
@@ -49,9 +59,12 @@ function pickDefaultDevice(devices: DeviceSpec[]): DeviceSpec {
 export default function App() {
   const [mode, setMode] = useState<AppMode>('boot')
   const [caps, setCaps] = useState<CapabilitiesResponse | null>(null)
-  const [deviceSpec, setDeviceSpec] = useState<DeviceSpec>('cpu')
 
-  const [mirrorDefault, setMirrorDefaultState] = useState<boolean>(() => getMirrorDefault())
+  const [modelSource, setModelSource] = useState<LaunchModelSource>(() => getLaunchModelSource())
+  const [customRepoId, setCustomRepoId] = useState<string>(() => getLaunchCustomRepoId())
+  const [mirror, setMirror] = useState<boolean>(() => getLaunchMirror())
+  const [deviceSpec, setDeviceSpec] = useState<DeviceSpec>(() => getLaunchDeviceSpec() ?? 'cpu')
+
   const [stage, setStage] = useState<VoxcpmStage | string | null>(null)
   const [stageMessage, setStageMessage] = useState<string | null>(null)
   const [download, setDownload] = useState<DownloadEventPayload | null>(null)
@@ -145,7 +158,10 @@ export default function App() {
         )
         if (cancelled) return
         setCaps(c)
-        setDeviceSpec(pickDefaultDevice(c.devices))
+
+        const savedDevice = getLaunchDeviceSpec()
+        const effectiveDevice = savedDevice && c.devices.includes(savedDevice) ? savedDevice : pickDefaultDevice(c.devices)
+        setDeviceSpec(effectiveDevice)
         setMode('select_device')
       } catch (e) {
         if (cancelled) return
@@ -160,10 +176,28 @@ export default function App() {
 
   useEffect(() => {
     // Keep localStorage in sync.
-    setMirrorDefault(mirrorDefault)
-  }, [mirrorDefault])
+    setLaunchMirror(mirror)
+  }, [mirror])
 
-  async function startPrepare(mirror: boolean, deviceOverride?: DeviceSpec) {
+  useEffect(() => {
+    setLaunchDeviceSpec(deviceSpec)
+  }, [deviceSpec])
+
+  useEffect(() => {
+    setLaunchModelSource(modelSource)
+  }, [modelSource])
+
+  useEffect(() => {
+    setLaunchCustomRepoId(customRepoId)
+  }, [customRepoId])
+
+  const effectiveRepoId = useMemo(() => {
+    if (modelSource !== 'custom') return null
+    const s = customRepoId.trim()
+    return s === '' ? null : s
+  }, [customRepoId, modelSource])
+
+  async function startPrepare(opts?: { mirror?: boolean; deviceOverride?: DeviceSpec; repoId?: string | null }) {
     setLog('')
     pendingLogRef.current = ''
     if (logFlushRafRef.current != null) {
@@ -177,11 +211,17 @@ export default function App() {
     setShowDownloadError(null)
     setMode('downloading_loading')
 
-    const effectiveDevice = deviceOverride ?? deviceSpec
-    if (deviceOverride) setDeviceSpec(deviceOverride)
+    const effectiveMirror = opts?.mirror ?? mirror
+    const effectiveDevice = opts?.deviceOverride ?? deviceSpec
+    const repoIdToUse = opts?.repoId ?? effectiveRepoId
+    if (opts?.deviceOverride) setDeviceSpec(opts.deviceOverride)
 
     try {
-      await invoke('prepare_default_model', { deviceSpec: effectiveDevice, mirror })
+      await invoke('prepare_default_model', {
+        deviceSpec: effectiveDevice,
+        mirror: effectiveMirror,
+        repoId: repoIdToUse,
+      })
       // Transition happens via voxcpm:stage ready.
     } catch (e) {
       setShowDownloadError({ message: String(e) })
@@ -236,11 +276,9 @@ export default function App() {
     if (mode === 'boot') {
       return (
         <div className="container">
-          <div className="topbar">
-            <div className="topbarTitle">VoxCPM Desktop</div>
-          </div>
-          <div className="card" style={{ marginTop: 24 }}>
+          <div className="card">
             <div className="cardBody">
+              <div className="appTitle">VoxCPM Desktop</div>
               <div>Booting…</div>
               <div className="muted small" style={{ marginTop: 8 }}>
                 {bootInfo}
@@ -253,21 +291,22 @@ export default function App() {
 
     if (mode === 'error') {
       return (
-        <div className="container">
-          <div className="topbar">
-            <div className="topbarTitle">VoxCPM Desktop</div>
-          </div>
-          <div className="card" style={{ marginTop: 24 }}>
-            <div className="cardHeader">
-              <div>
-                <div className="h2">Error</div>
-                <div className="muted">Failed to boot</div>
+        <>
+          <div className="container">
+            <div className="card">
+              <div className="cardBody">
+                <div className="appTitle">VoxCPM Desktop</div>
               </div>
             </div>
-            <div className="cardBody">
-              <pre className="pre">{stageMessage ?? 'unknown error'}</pre>
-            </div>
-            <div className="cardFooter">
+          </div>
+
+          <Modal
+            title="Failed to boot"
+            onClose={() => {
+              setStageMessage(null)
+              setMode('boot')
+            }}
+            footer={
               <button
                 className="btn btnPrimary"
                 onClick={() => {
@@ -277,9 +316,13 @@ export default function App() {
               >
                 Retry
               </button>
-            </div>
-          </div>
-        </div>
+            }
+          >
+            <pre className="pre" style={{ margin: 0 }}>
+              {stageMessage ?? 'unknown error'}
+            </pre>
+          </Modal>
+        </>
       )
     }
 
@@ -291,11 +334,15 @@ export default function App() {
       return (
         <LaunchScreen
           caps={caps}
+          modelSource={modelSource}
+          customRepoId={customRepoId}
+          mirror={mirror}
           deviceSpec={deviceSpec}
-          mirrorDefault={mirrorDefault}
+          onChangeModelSource={setModelSource}
+          onChangeCustomRepoId={setCustomRepoId}
+          onToggleMirror={setMirror}
           onChangeDeviceSpec={setDeviceSpec}
-          onToggleMirrorDefault={setMirrorDefaultState}
-          onStartLoading={() => startPrepare(mirrorDefault)}
+          onStartLoading={() => startPrepare()}
         />
       )
     }
@@ -319,14 +366,14 @@ export default function App() {
                   <button className="btn btnGhost" onClick={() => setMode('select_device')}>
                     Back
                   </button>
-                  <button className="btn" onClick={() => startPrepare(false)}>
+                  <button className="btn" onClick={() => startPrepare({ mirror: false })}>
                     Retry official
                   </button>
-                  <button className="btn btnPrimary" onClick={() => startPrepare(true)}>
+                  <button className="btn btnPrimary" onClick={() => startPrepare({ mirror: true })}>
                     Retry with mirror
                   </button>
                   {deviceSpec !== 'cpu' ? (
-                    <button className="btn" onClick={() => startPrepare(mirrorDefault, 'cpu')}>
+                    <button className="btn" onClick={() => startPrepare({ deviceOverride: 'cpu' })}>
                       Switch to CPU
                     </button>
                   ) : null}
@@ -375,9 +422,11 @@ export default function App() {
     inferenceSteps,
     isGenerating,
     log,
-    mirrorDefault,
+    mirror,
+    modelSource,
     mode,
     progress,
+    customRepoId,
     referenceAudioName,
     referenceText,
     showDownloadError,

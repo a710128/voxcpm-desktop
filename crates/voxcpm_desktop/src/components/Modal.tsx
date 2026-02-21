@@ -11,6 +11,11 @@ export function Modal(props: {
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const closeBtnRef = useRef<HTMLButtonElement | null>(null)
+  const onCloseRef = useRef<(() => void) | undefined>(props.onClose)
+
+  useEffect(() => {
+    onCloseRef.current = props.onClose
+  }, [props.onClose])
 
   useEffect(() => {
     // Best-effort focus management (no full focus trap).
@@ -20,17 +25,19 @@ export function Modal(props: {
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
       )
     el?.focus()
+  }, [])
 
+  useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== 'Escape') return
-      if (!props.onClose) return
+      if (!onCloseRef.current) return
       e.preventDefault()
-      props.onClose()
+      onCloseRef.current()
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [props.onClose])
+  }, [])
 
   return (
     <div className="modalOverlay" role="dialog" aria-modal="true" aria-labelledby={titleId}>
