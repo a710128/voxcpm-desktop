@@ -91,6 +91,24 @@ body {
   margin-bottom: var(--s-4);
 }
 
+/* ProgressScreen layout: top bar + centered progress card. */
+.progressScreen {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.progressStage {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.progressCardWrap {
+  width: min(560px, 100%);
+}
+
 .appTitle {
   font-family: var(--font-display);
   font-weight: 700;
