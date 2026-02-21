@@ -418,6 +418,10 @@ input[type="radio"]:focus-visible {
   overflow: hidden;
 }
 
+.progressBarCombined {
+  position: relative;
+}
+
 .progressFill {
   height: 100%;
   background: var(--accent);
@@ -446,6 +450,30 @@ input[type="radio"]:focus-visible {
   100% {
     transform: translateX(260%);
   }
+}
+
+/* Indeterminate overlay constrained to a segment of the bar. */
+.progressIndeterminate {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  overflow: hidden;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.progressIndeterminate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  background-color: var(--accent);
+  animation: indeterminate 1.2s infinite ease-in-out;
+}
+
+.progressIndeterminateLoad::after {
+  background-color: var(--accent-2);
 }
 
 .timeRuler {
@@ -547,6 +575,9 @@ input[type="radio"]:focus-visible {
     transition: none;
   }
   .progressBar.indeterminate::after {
+    animation: none;
+  }
+  .progressIndeterminate::after {
     animation: none;
   }
   .timeRuler.indeterminate::after {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::{InvokeResponseBody, Response};
 use tauri::{Emitter, Manager};
 
-use voxcpm_engine_sdk::{EngineSdk, Event, ModelHandle};
+use voxcpm_engine_sdk::{EngineSdk, Event, ModelHandle, SdkError};
 use voxcpm_ipc::EngineEvent;
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
@@ -56,6 +56,7 @@ struct AppState {
     models: Mutex<HashMap<ModelKey, ModelHandle>>,
     prepared_default: Mutex<Option<PreparedDefault>>,
     active_download_job_id: AtomicU64,
+    active_prepare_cancel_nonce: AtomicU64,
     active_generate_job_id: AtomicU64,
 }
 
@@ -183,6 +184,9 @@ async fn ensure_model(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+    // No longer an active download job.
+    st.active_download_job_id.store(0, Ordering::Relaxed);
 
     let _ = window.emit(
         "voxcpm:download",
@@ -314,6 +318,9 @@ async fn prepare_default_model(
 ) -> Result<PrepareDefaultModelResult, String> {
     let st = app.state::<AppState>();
 
+    // Capture a nonce so we can ignore cancellation races.
+    let cancel_nonce = st.active_prepare_cancel_nonce.load(Ordering::Relaxed);
+
     let repo_id = normalize_opt_str(params.repo_id).unwrap_or_else(|| DEFAULT_REPO_ID.to_string());
 
     // Fast-path: already prepared for this device.
@@ -344,9 +351,19 @@ async fn prepare_default_model(
         )
         .await
         .map_err(|e| {
-            emit_stage(&app, "error", Some(e.to_string()));
+            // Back-triggered cancellation should not surface as an error modal.
+            let is_cancelled = matches!(
+                &e,
+                SdkError::Engine { code, .. } if code == "cancelled"
+            ) || st.active_prepare_cancel_nonce.load(Ordering::Relaxed) != cancel_nonce;
+            if !is_cancelled {
+                emit_stage(&app, "error", Some(e.to_string()));
+            }
             e.to_string()
         })?;
+
+    // Download completed; stop treating it as the active cancellable job.
+    st.active_download_job_id.store(0, Ordering::Relaxed);
 
     emit_stage(&app, "verify", None);
     emit_stage(&app, "load", None);
@@ -375,6 +392,25 @@ async fn prepare_default_model(
     });
     emit_stage(&app, "ready", None);
     Ok(PrepareDefaultModelResult { model_loaded: true })
+}
+
+#[tauri::command]
+async fn cancel_prepare_default_model(app: tauri::AppHandle) -> Result<Option<u64>, String> {
+    let st = app.state::<AppState>();
+    // Bump nonce so in-flight prepare_default_model can treat subsequent errors as cancelled.
+    st.active_prepare_cancel_nonce.fetch_add(1, Ordering::Relaxed);
+
+    // Stop forwarding download progress after cancellation.
+    let target = st.active_download_job_id.swap(0, Ordering::Relaxed);
+    if target == 0 {
+        return Ok(None);
+    }
+
+    let job_id = next_job_id();
+    st.engine
+        .cancel_download(job_id, target)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -446,6 +482,7 @@ fn main() {
                 models: Mutex::new(HashMap::new()),
                 prepared_default: Mutex::new(None),
                 active_download_job_id: AtomicU64::new(0),
+                active_prepare_cancel_nonce: AtomicU64::new(0),
                 active_generate_job_id: AtomicU64::new(0),
             };
             app.manage(st);
@@ -462,7 +499,9 @@ fn main() {
                         Event::Engine(EngineEvent::DownloadProgress(p)) => {
                             let st = app_handle2.state::<AppState>();
                             let active = st.active_download_job_id.load(Ordering::Relaxed);
-                            if active != 0 && p.job_id != active {
+                            // Only forward the active download job to the frontend.
+                            // When there's no active job, drop all download progress.
+                            if active == 0 || p.job_id != active {
                                 continue;
                             }
                             let _ = app_handle2.emit(
@@ -515,6 +554,7 @@ fn main() {
             stop_generate,
             get_capabilities,
             prepare_default_model,
+            cancel_prepare_default_model,
             generate_v1
         ])
         .build(tauri::generate_context!())

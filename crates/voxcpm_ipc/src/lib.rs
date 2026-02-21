@@ -55,6 +55,7 @@ pub fn try_decode_frame<T: DeserializeOwned>(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostToEngine {
     DownloadModel(DownloadModelRequest),
+    CancelDownload(CancelDownloadRequest),
     LoadModel(LoadModelRequest),
     Generate(GenerateRequest),
     StopGenerate(StopGenerateRequest),
@@ -73,6 +74,7 @@ pub enum EngineToHost {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EngineOp {
     DownloadModel,
+    CancelDownload,
     LoadModel,
     Generate,
     StopGenerate,
@@ -134,6 +136,20 @@ pub struct DownloadProgress {
 pub struct DownloadModelResponse {
     pub job_id: JobId,
     pub model_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelDownloadRequest {
+    /// Job id for this cancel operation.
+    pub job_id: JobId,
+    /// The download job to cancel.
+    pub target_job_id: JobId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelDownloadResponse {
+    pub job_id: JobId,
+    pub cancelled_job_id: Option<JobId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +237,7 @@ pub struct ExitResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineResponse {
     DownloadModel(DownloadModelResponse),
+    CancelDownload(CancelDownloadResponse),
     LoadModel(LoadModelResponse),
     Generate(GenerateResponse),
     StopGenerate(StopGenerateResponse),

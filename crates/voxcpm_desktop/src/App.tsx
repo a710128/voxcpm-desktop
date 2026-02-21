@@ -60,6 +60,11 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>('boot')
   const [caps, setCaps] = useState<CapabilitiesResponse | null>(null)
 
+  const modeRef = useRef<AppMode>(mode)
+  useEffect(() => {
+    modeRef.current = mode
+  }, [mode])
+
   const [modelSource, setModelSource] = useState<LaunchModelSource>(() => getLaunchModelSource())
   const [customRepoId, setCustomRepoId] = useState<string>(() => getLaunchCustomRepoId())
   const [mirror, setMirror] = useState<boolean>(() => getLaunchMirror())
@@ -72,6 +77,9 @@ export default function App() {
   const [log, setLog] = useState<string>('')
   const pendingLogRef = useRef<string>('')
   const logFlushRafRef = useRef<number | null>(null)
+
+  // Used to suppress surfacing errors after a user-triggered cancel.
+  const prepareCancelNonceRef = useRef<number>(0)
 
   const MAX_LOG_CHARS = 200_000
 
@@ -109,11 +117,15 @@ export default function App() {
       setStage(e.payload.stage)
       setStageMessage(e.payload.message ?? null)
       if (e.payload.stage === 'ready') {
-        // Auto transition to workspace.
-        setMode('workspace')
+        // Only auto-transition if user is still on the progress screen.
+        if (modeRef.current === 'downloading_loading') {
+          setMode('workspace')
+        }
       }
       if (e.payload.stage === 'error') {
-        setShowDownloadError({ message: e.payload.message ?? 'unknown error' })
+        if (modeRef.current === 'downloading_loading') {
+          setShowDownloadError({ message: e.payload.message ?? 'unknown error' })
+        }
       }
     })
 
@@ -121,6 +133,7 @@ export default function App() {
       setProgress(e.payload)
     })
     const unlistenD = listen<DownloadEventPayload>('voxcpm:download', (e) => {
+      if (modeRef.current !== 'downloading_loading') return
       setDownload(e.payload)
     })
     const unlistenL = listen<string>('voxcpm:log', (e) => {
@@ -198,6 +211,7 @@ export default function App() {
   }, [customRepoId, modelSource])
 
   async function startPrepare(opts?: { mirror?: boolean; deviceOverride?: DeviceSpec; repoId?: string | null }) {
+    const localCancelNonce = prepareCancelNonceRef.current
     setLog('')
     pendingLogRef.current = ''
     if (logFlushRafRef.current != null) {
@@ -218,12 +232,16 @@ export default function App() {
 
     try {
       await invoke('prepare_default_model', {
-        deviceSpec: effectiveDevice,
-        mirror: effectiveMirror,
-        repoId: repoIdToUse,
+        params: {
+          deviceSpec: effectiveDevice,
+          mirror: effectiveMirror,
+          repoId: repoIdToUse,
+        },
       })
       // Transition happens via voxcpm:stage ready.
     } catch (e) {
+      // Ignore errors from a cancelled run (e.g. user pressed Back).
+      if (prepareCancelNonceRef.current !== localCancelNonce) return
       setShowDownloadError({ message: String(e) })
     }
   }
@@ -349,41 +367,37 @@ export default function App() {
 
     if (mode === 'downloading_loading') {
       return (
-        <>
-          <ProgressScreen
-            stage={stage}
-            stageMessage={stageMessage}
-            download={download}
-            log={log}
-            onBack={() => setMode('select_device')}
-          />
-          {showDownloadError ? (
-            <Modal
-              title="Download failed"
-              onClose={() => setShowDownloadError(null)}
-              footer={
-                <>
-                  <button className="btn btnGhost" onClick={() => setMode('select_device')}>
-                    Back
-                  </button>
-                  <button className="btn" onClick={() => startPrepare({ mirror: false })}>
-                    Retry official
-                  </button>
-                  <button className="btn btnPrimary" onClick={() => startPrepare({ mirror: true })}>
-                    Retry with mirror
-                  </button>
-                  {deviceSpec !== 'cpu' ? (
-                    <button className="btn" onClick={() => startPrepare({ deviceOverride: 'cpu' })}>
-                      Switch to CPU
-                    </button>
-                  ) : null}
-                </>
+        <ProgressScreen
+          stage={stage}
+          stageMessage={stageMessage}
+          download={download}
+          log={log}
+          onBack={() => {
+            // Best-effort cancellation; UI navigates immediately.
+            prepareCancelNonceRef.current += 1
+            void (async () => {
+              try {
+                await invoke('cancel_prepare_default_model')
+              } catch (e) {
+                // Keep this best-effort: cancellation failure shouldn't block navigation.
+                // This is useful for debugging if the sidecar rejects the command.
+                setLog((prev) => prev + `\nCancel download failed: ${String(e)}\n`)
               }
-            >
-              <div className="muted">{showDownloadError.message}</div>
-            </Modal>
-          ) : null}
-        </>
+            })()
+            setShowDownloadError(null)
+            setDownload(null)
+            setStage(null)
+            setStageMessage(null)
+            setMode('select_device')
+          }}
+          error={showDownloadError}
+          onDismissError={() => setShowDownloadError(null)}
+          onBackToLaunch={() => {
+            setShowDownloadError(null)
+            setMode('select_device')
+          }}
+          onRetry={() => startPrepare()}
+        />
       )
     }
 

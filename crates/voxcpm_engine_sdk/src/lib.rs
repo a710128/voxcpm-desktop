@@ -172,6 +172,7 @@ impl EngineSdk {
                                     EngineToHost::Response(resp) => {
                                         let job_id = match &resp {
                                             EngineResponse::DownloadModel(r) => r.job_id,
+                                            EngineResponse::CancelDownload(r) => r.job_id,
                                             EngineResponse::LoadModel(r) => r.job_id,
                                             EngineResponse::Generate(r) => r.job_id,
                                             EngineResponse::StopGenerate(r) => r.job_id,
@@ -254,9 +255,15 @@ impl EngineSdk {
         }
 
         let frame = encode_frame(&msg).map_err(|e| SdkError::Ipc(e.to_string()))?;
-        let write = self.write.lock().await;
-        let jh = (write)(frame);
-        jh.await.map_err(|e| SdkError::Io(e.to_string()))??;
+
+        // IMPORTANT: only hold the write lock for the actual write.
+        // Long-running ops (e.g. DownloadModel) wait for their response while other
+        // control ops (e.g. CancelDownload) must still be able to send messages.
+        {
+            let write = self.write.lock().await;
+            let jh = (write)(frame);
+            jh.await.map_err(|e| SdkError::Io(e.to_string()))??;
+        }
 
         let resp = rx.await.map_err(|_| SdkError::EngineTerminated)?;
         match resp {
@@ -382,6 +389,27 @@ impl EngineSdk {
             .await?;
         match resp {
             EngineResponse::StopGenerate(r) => Ok(r.cancelled_job_id),
+            _ => Err(SdkError::Ipc("unexpected response".into())),
+        }
+    }
+
+    pub async fn cancel_download(
+        &self,
+        job_id: JobId,
+        target_job_id: JobId,
+    ) -> Result<Option<JobId>, SdkError> {
+        let resp = self
+            .call(
+                job_id,
+                EngineOp::CancelDownload,
+                HostToEngine::CancelDownload(voxcpm_ipc::CancelDownloadRequest {
+                    job_id,
+                    target_job_id,
+                }),
+            )
+            .await?;
+        match resp {
+            EngineResponse::CancelDownload(r) => Ok(r.cancelled_job_id),
             _ => Err(SdkError::Ipc("unexpected response".into())),
         }
     }
@@ -519,6 +547,7 @@ mod tauri_sidecar {
                                         EngineToHost::Response(resp) => {
                                             let job_id = match &resp {
                                                 EngineResponse::DownloadModel(r) => r.job_id,
+                                                EngineResponse::CancelDownload(r) => r.job_id,
                                                 EngineResponse::LoadModel(r) => r.job_id,
                                                 EngineResponse::Generate(r) => r.job_id,
                                                 EngineResponse::StopGenerate(r) => r.job_id,

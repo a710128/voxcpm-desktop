@@ -1,7 +1,10 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Notify;
 
 use crate::ipc::{send_error, OutTx};
 
@@ -11,6 +14,30 @@ use voxcpm_ipc::{
 };
 
 const DEFAULT_HF_ENDPOINT: &str = "https://huggingface.co";
+
+#[derive(Clone)]
+pub(crate) struct DownloadCancel {
+    cancelled: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl DownloadCancel {
+    pub(crate) fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
 
 async fn check_remote_accessible(
     client: &reqwest::Client,
@@ -128,7 +155,11 @@ async fn download_one(
     local_root: &PathBuf,
     file_done: u32,
     file_total: u32,
+    cancel: Option<&DownloadCancel>,
 ) -> Result<(), String> {
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err("cancelled".to_string());
+    }
     if file_path.contains("..") || file_path.starts_with('/') || file_path.starts_with('\\') {
         return Err(format!("invalid file_path: {file_path}"));
     }
@@ -247,7 +278,28 @@ async fn download_one(
     use futures_util::StreamExt;
     let mut downloaded: u64 = 0;
     let mut last_emit = Instant::now();
-    while let Some(item) = stream.next().await {
+    loop {
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            drop(f);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err("cancelled".to_string());
+        }
+
+        let item = if let Some(c) = cancel {
+            tokio::select! {
+                _ = c.notify.notified() => {
+                    drop(f);
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                    return Err("cancelled".to_string());
+                }
+                it = stream.next() => it,
+            }
+        } else {
+            stream.next().await
+        };
+
+        let Some(item) = item else { break };
+
         let chunk = item.map_err(|e| e.to_string())?;
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         f.write_all(&chunk).await.map_err(|e| e.to_string())?;
@@ -311,6 +363,7 @@ async fn download_one(
 pub(crate) async fn handle_download_model(
     out_tx: OutTx,
     req: DownloadModelRequest,
+    cancel: Option<DownloadCancel>,
 ) -> Result<(), String> {
     let job_id = req.job_id;
     let _ = out_tx
@@ -419,18 +472,31 @@ pub(crate) async fn handle_download_model(
             &model_dir,
             i as u32,
             4,
+            cancel.as_ref(),
         )
         .await
         {
-            send_error(
-                &out_tx,
-                job_id,
-                EngineOp::DownloadModel,
-                "download",
-                e,
-                true,
-            )
-            .await;
+            if e.trim() == "cancelled" {
+                send_error(
+                    &out_tx,
+                    job_id,
+                    EngineOp::DownloadModel,
+                    "cancelled",
+                    "cancelled".to_string(),
+                    false,
+                )
+                .await;
+            } else {
+                send_error(
+                    &out_tx,
+                    job_id,
+                    EngineOp::DownloadModel,
+                    "download",
+                    e,
+                    true,
+                )
+                .await;
+            }
             return Ok(());
         }
     }
@@ -448,9 +514,22 @@ pub(crate) async fn handle_download_model(
         &model_dir,
         3,
         4,
+        cancel.as_ref(),
     )
     .await;
     if audio_res.is_err() {
+        if audio_res.as_ref().is_err_and(|e| e.trim() == "cancelled") {
+            send_error(
+                &out_tx,
+                job_id,
+                EngineOp::DownloadModel,
+                "cancelled",
+                "cancelled".to_string(),
+                false,
+            )
+            .await;
+            return Ok(());
+        }
         if let Err(e) = download_one(
             &out_tx,
             &client,
@@ -463,18 +542,31 @@ pub(crate) async fn handle_download_model(
             &model_dir,
             3,
             4,
+            cancel.as_ref(),
         )
         .await
         {
-            send_error(
-                &out_tx,
-                job_id,
-                EngineOp::DownloadModel,
-                "download",
-                e,
-                true,
-            )
-            .await;
+            if e.trim() == "cancelled" {
+                send_error(
+                    &out_tx,
+                    job_id,
+                    EngineOp::DownloadModel,
+                    "cancelled",
+                    "cancelled".to_string(),
+                    false,
+                )
+                .await;
+            } else {
+                send_error(
+                    &out_tx,
+                    job_id,
+                    EngineOp::DownloadModel,
+                    "download",
+                    e,
+                    true,
+                )
+                .await;
+            }
             return Ok(());
         }
     }

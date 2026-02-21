@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
 
-use crate::download::handle_download_model;
+use crate::download::{handle_download_model, DownloadCancel};
 use crate::infer_actor::InferenceActorHandle;
 use crate::inference::{handle_exit, handle_generate, handle_load_model, handle_stop};
 use crate::ipc::OutTx;
@@ -15,8 +17,19 @@ use voxcpm_ipc::{
     HostToEngine, ListDevicesRequest, ListDevicesResponse, LogLevel, DEFAULT_MAX_FRAME_LEN,
 };
 
+use voxcpm_ipc::{CancelDownloadRequest, CancelDownloadResponse, JobId};
+
+struct DownloadTask {
+    cancel: DownloadCancel,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 pub(crate) async fn run() -> Result<(), String> {
     let (out_tx, mut out_rx) = mpsc::channel::<EngineToHost>(1024);
+
+    // Track in-flight download tasks so we can cancel them by job_id.
+    let download_tasks: Arc<AsyncMutex<HashMap<JobId, DownloadTask>>> =
+        Arc::new(AsyncMutex::new(HashMap::new()));
 
     // Single writer task for stdout (binary-safe framing).
     let stdout_task = tokio::spawn(async move {
@@ -58,6 +71,31 @@ pub(crate) async fn run() -> Result<(), String> {
                     handle_exit(st.clone(), out_tx.clone(), req).await?;
                     break 'stdin;
                 }
+                HostToEngine::CancelDownload(req) => {
+                    handle_cancel_download(download_tasks.clone(), out_tx.clone(), req).await;
+                }
+                HostToEngine::DownloadModel(req) => {
+                    let job_id = req.job_id;
+                    let out_tx = out_tx.clone();
+                    let download_tasks2 = download_tasks.clone();
+                    let cancel = DownloadCancel::new();
+                    let cancel2 = cancel.clone();
+                    let h = tokio::spawn(async move {
+                        let out_tx2 = out_tx.clone();
+                        if let Err(e) = handle_download_model(out_tx2, req, Some(cancel2)).await {
+                            let _ = out_tx
+                                .send(EngineToHost::Event(EngineEvent::Log {
+                                    level: LogLevel::Error,
+                                    message: format!("handle_download_model failed: {e}"),
+                                }))
+                                .await;
+                        }
+                        let mut g = download_tasks2.lock().await;
+                        g.remove(&job_id);
+                    });
+                    let mut g = download_tasks.lock().await;
+                    g.insert(job_id, DownloadTask { cancel, handle: h });
+                }
                 other => {
                     let out_tx = out_tx.clone();
                     let st = st.clone();
@@ -81,6 +119,15 @@ pub(crate) async fn run() -> Result<(), String> {
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
 
+    // Stop in-flight downloads (they are spawned outside JoinSet).
+    let downloads_all = {
+        let mut g = download_tasks.lock().await;
+        std::mem::take(&mut *g)
+    };
+    for (_, t) in downloads_all {
+        t.handle.abort();
+    }
+
     // Stop the inference actor (after cancel was signaled in handle_exit).
     let infer = {
         let mut stg = st.lock().await;
@@ -95,13 +142,80 @@ pub(crate) async fn run() -> Result<(), String> {
     Ok(())
 }
 
+async fn handle_cancel_download(
+    download_tasks: Arc<AsyncMutex<HashMap<JobId, DownloadTask>>>,
+    out_tx: OutTx,
+    req: CancelDownloadRequest,
+) {
+    let job_id = req.job_id;
+    let target = req.target_job_id;
+
+    // Signal cancel ASAP; never block on stdout backpressure.
+    let cancelled = {
+        let g = download_tasks.lock().await;
+        if let Some(t) = g.get(&target) {
+            t.cancel.cancel();
+            Some(target)
+        } else {
+            None
+        }
+    };
+
+    // Best-effort: send Ack/Error/Response without blocking the main loop.
+    // If stdout is back-pressured, these sends may be delayed, but cancellation is already signaled.
+    let out_tx2 = out_tx.clone();
+    let download_tasks2 = download_tasks.clone();
+    tokio::spawn(async move {
+        let _ = out_tx2
+            .send(EngineToHost::Ack {
+                job_id,
+                op: EngineOp::CancelDownload,
+            })
+            .await;
+
+        if let Some(cancelled_job_id) = cancelled {
+            // Unblock the host waiting on the original download_model call.
+            let _ = out_tx2
+                .send(EngineToHost::Error(voxcpm_ipc::EngineError {
+                    job_id: cancelled_job_id,
+                    op: EngineOp::DownloadModel,
+                    code: "cancelled".to_string(),
+                    message: "cancelled".to_string(),
+                    retryable: false,
+                }))
+                .await;
+
+            // Fallback: if the task doesn't exit promptly (e.g. stuck in a preflight request),
+            // abort it so we don't keep downloading in the background.
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let mut g = download_tasks2.lock().await;
+                if let Some(t) = g.remove(&cancelled_job_id) {
+                    t.handle.abort();
+                }
+            });
+        }
+
+        let _ = out_tx2
+            .send(EngineToHost::Response(EngineResponse::CancelDownload(
+                CancelDownloadResponse {
+                    job_id,
+                    cancelled_job_id: cancelled,
+                },
+            )))
+            .await;
+    });
+}
+
 async fn handle_msg(
     st: Arc<AsyncMutex<EngineState>>,
     out_tx: OutTx,
     msg: HostToEngine,
 ) -> Result<(), String> {
     match msg {
-        HostToEngine::DownloadModel(req) => handle_download_model(out_tx, req).await,
+        HostToEngine::DownloadModel(req) => handle_download_model(out_tx, req, None).await,
+        // CancelDownload is handled in-line in the main loop.
+        HostToEngine::CancelDownload(_) => Ok(()),
         HostToEngine::LoadModel(req) => handle_load_model(st, out_tx, req).await,
         HostToEngine::Generate(req) => handle_generate(st, out_tx, req).await,
         HostToEngine::StopGenerate(req) => handle_stop(st, out_tx, req).await,
