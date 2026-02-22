@@ -39,23 +39,33 @@ __device__ double atomicAdd(double* address, double val) {
 // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#atomicadd
 // The 16-bit __half floating-point version of atomicAdd() is only supported by devices of compute capability 7.x and higher.
 // Solution adapted from https://github.com/torch/cutorch/blob/master/lib/THC/THCAtomics.cuh#L96-L119
-//__device__ __half atomicAdd(__half *address, __half val) {
-   //  unsigned int *address_as_ui = (unsigned int *) ((char *)address - ((size_t)address & 2));
-   //  unsigned int old = *address_as_ui;
-   //  unsigned int assumed;
-   //  bool unaligned = (size_t) address & 2;
-   //  do {
-   //      assumed = old;
-   //      unsigned int hsum;
-   //      hsum = unaligned ? (old >> 16) : (old & 0xffff);
-   //      hsum = __half_as_ushort(__ushort_as_half(hsum) + val); 
-   //      old = atomicCAS(address_as_ui, assumed,
-   //          unaligned ? (old & 0xffff) | (hsum << 16) : (old & 0xffff0000) | hsum
-   //      );
+__device__ __forceinline__ __half atomicAdd(__half *address, __half val) {
+    // Pre-sm_70 there is no native atomicAdd(__half*). Implement via atomicCAS on the
+    // containing 32-bit word, updating one 16-bit lane.
+    unsigned int *address_as_ui = (unsigned int *)((char *)address - ((size_t)address & 2));
+    unsigned int old = *address_as_ui;
+    unsigned int assumed;
+    bool unaligned = (size_t)address & 2;
+    do {
+        assumed = old;
+        unsigned short old_bits = (unsigned short)(unaligned ? (assumed >> 16) : (assumed & 0xffff));
+        __half old_h = __ushort_as_half(old_bits);
 
-   // } while (assumed != old);
-   // return __ushort_as_half(unaligned ? (old >> 16) : (old & 0xffff));
-//}
+        // Do the math in f32 to avoid relying on half ALU details.
+        float sum = __half2float(old_h) + __half2float(val);
+        __half new_h = __float2half_rn(sum);
+        unsigned short new_bits = __half_as_ushort(new_h);
+
+        unsigned int new_word = unaligned ? ((assumed & 0xffff) | ((unsigned int)new_bits << 16))
+                                          : ((assumed & 0xffff0000) | (unsigned int)new_bits);
+        old = atomicCAS(address_as_ui, assumed, new_word);
+
+        // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
+    } while (assumed != old);
+
+    unsigned short ret_bits = (unsigned short)(unaligned ? (old >> 16) : (old & 0xffff));
+    return __ushort_as_half(ret_bits);
+}
 #endif
 
 

@@ -1077,13 +1077,28 @@ impl VoxCpmBuilder {
             }
         };
 
-        let dtype = self.dtype.or(config.dtype()).unwrap_or(DType::BF16);
+        // DType selection (model weights + runtime buffers).
+        // Priority:
+        // 1) Explicit builder override.
+        // 2) CUDA: pick based on SM (ignore config.json dtype).
+        // 3) Non-CUDA: config.json dtype.
+        // 4) Default: BF16.
+        let mut dtype = self.dtype.unwrap_or_else(|| {
+            #[cfg(feature = "cuda")]
+            if device.is_cuda() {
+                // sm < 80 -> fp16, sm >= 80 -> bf16. If we cannot query SM, default bf16.
+                return match cuda_sm(device.as_cuda_device().ok()) {
+                    Some(sm) if sm < 80 => DType::F16,
+                    Some(_) => DType::BF16,
+                    None => DType::BF16,
+                };
+            }
+            config.dtype().unwrap_or(DType::BF16)
+        });
         // CPU fallback: prefer fp32 for broad op coverage and stability.
-        let dtype = if matches!(device, Device::Cpu) {
-            DType::F32
-        } else {
-            dtype
-        };
+        if matches!(device, Device::Cpu) {
+            dtype = DType::F32;
+        }
 
         // CUDA device init: keep behavior centralized here.
         #[cfg(feature = "cuda")]
@@ -1167,4 +1182,23 @@ impl VoxCpmBuilder {
             "unsupported device spec: {s} (use cpu, cuda:N, metal[:N])"
         )))
     }
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_sm(cuda: Option<&candle_core::cuda_backend::CudaDevice>) -> Option<u32> {
+    use candle_core::cuda_backend::cudarc::driver::sys;
+
+    let cuda = cuda?;
+    let stream = cuda.cuda_stream();
+    let ctx = stream.context();
+    let major = ctx
+        .attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .ok()?;
+    let minor = ctx
+        .attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+        .ok()?;
+    if major < 0 || minor < 0 {
+        return None;
+    }
+    Some((major as u32) * 10 + (minor as u32))
 }
