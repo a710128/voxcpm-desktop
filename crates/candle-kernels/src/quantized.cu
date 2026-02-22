@@ -4331,6 +4331,7 @@ extern "C" __global__ void
 }
 
 
+#if !defined(CANDLE_DISABLE_MOE)
 /**
  * @brief Performs an indexed, batched matrix-vector multiplication for quantized tensors (for MoE models).
  *
@@ -4535,3 +4536,5 @@ extern "C" __global__ void indexed_moe_forward_q8_0_q8_1(
     indexed_moe_forward<QK8_0, QI8_0, block_q8_0, VDR_Q8_0_Q8_1_MMVQ, vec_dot_q8_0_q8_1>
         (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
 }
+
+#endif // !defined(CANDLE_DISABLE_MOE)

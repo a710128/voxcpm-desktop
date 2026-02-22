@@ -653,31 +653,8 @@ impl QTensor {
     }
 
     pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
-        match &self.storage {
-            QStorage::Cuda(s) => match (&*x.storage(), &*ids.storage()) {
-                (Storage::Cuda(x_storage), Storage::Cuda(ids_storage)) => {
-                    let (storage, out_shape) = s.indexed_moe_forward(
-                        self.shape(),
-                        x_storage,
-                        x.layout(),
-                        ids_storage,
-                        ids.layout(),
-                    )?;
-                    Ok(crate::tensor::from_storage(
-                        Storage::Cuda(storage),
-                        out_shape,
-                        crate::op::BackpropOp::none(),
-                        false,
-                    ))
-                }
-                _ => {
-                    panic!("Non-cuda indexed_moe_forward is not implemented!");
-                }
-            },
-            _ => {
-                panic!("indexed_moe_forward is not implemented in this platform!");
-            }
-        }
+        let _ = (x, ids);
+        crate::bail!("indexed_moe_forward is disabled (moe kernels removed)")
     }
 
     pub fn device_ptr(&self) -> Result<*const u8> {
@@ -761,12 +738,8 @@ impl QMatMul {
     }
 
     pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
-        match self {
-            Self::QTensor(t) => t.indexed_moe_forward(x, ids),
-            _ => {
-                panic!("Not implemented!")
-            }
-        }
+        let _ = (x, ids);
+        crate::bail!("indexed_moe_forward is disabled (moe kernels removed)")
     }
 }
 
