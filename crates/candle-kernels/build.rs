@@ -37,29 +37,29 @@ fn main() {
     let arch_list = parse_arch_list(&arch_list);
     let ptx_arch = parse_arch_token(&ptx_arch);
 
-    build_fatbin(&out_dir, "affine", "src/affine.cu", &arch_list, ptx_arch);
-    build_fatbin(&out_dir, "binary", "src/binary.cu", &arch_list, ptx_arch);
-    build_fatbin(&out_dir, "cast", "src/cast.cu", &arch_list, ptx_arch);
-    build_fatbin(&out_dir, "conv", "src/conv.cu", &arch_list, ptx_arch);
-    build_fatbin(&out_dir, "fill", "src/fill.cu", &arch_list, ptx_arch);
+    build_fatbin(&out_dir, "affine", "src/affine.cu", &arch_list, &ptx_arch);
+    build_fatbin(&out_dir, "binary", "src/binary.cu", &arch_list, &ptx_arch);
+    build_fatbin(&out_dir, "cast", "src/cast.cu", &arch_list, &ptx_arch);
+    build_fatbin(&out_dir, "conv", "src/conv.cu", &arch_list, &ptx_arch);
+    build_fatbin(&out_dir, "fill", "src/fill.cu", &arch_list, &ptx_arch);
     build_fatbin(
         &out_dir,
         "indexing",
         "src/indexing.cu",
         &arch_list,
-        ptx_arch,
+        &ptx_arch,
     );
     build_fatbin(
         &out_dir,
         "quantized",
         "src/quantized.cu",
         &arch_list,
-        ptx_arch,
+        &ptx_arch,
     );
-    build_fatbin(&out_dir, "reduce", "src/reduce.cu", &arch_list, ptx_arch);
-    build_fatbin(&out_dir, "sort", "src/sort.cu", &arch_list, ptx_arch);
-    build_fatbin(&out_dir, "ternary", "src/ternary.cu", &arch_list, ptx_arch);
-    build_fatbin(&out_dir, "unary", "src/unary.cu", &arch_list, ptx_arch);
+    build_fatbin(&out_dir, "reduce", "src/reduce.cu", &arch_list, &ptx_arch);
+    build_fatbin(&out_dir, "sort", "src/sort.cu", &arch_list, &ptx_arch);
+    build_fatbin(&out_dir, "ternary", "src/ternary.cu", &arch_list, &ptx_arch);
+    build_fatbin(&out_dir, "unary", "src/unary.cu", &arch_list, &ptx_arch);
 
     let mut moe_builder = bindgen_cuda::Builder::default()
         .arg("--expt-relaxed-constexpr")
@@ -125,7 +125,7 @@ fn parse_arch_token(token: &str) -> String {
     t
 }
 
-fn build_fatbin(out_dir: &PathBuf, name: &str, cu: &str, sm_list: &[String], ptx_arch: String) {
+fn build_fatbin(out_dir: &PathBuf, name: &str, cu: &str, sm_list: &[String], ptx_arch: &str) {
     let out = out_dir.join(format!("{name}.fatbin"));
 
     // nvcc --fatbin produces an image loadable via cuModuleLoadData.
