@@ -153,7 +153,7 @@ jobs:
           nvcc -V || true
 
       - name: Setup MSVC (cl.exe)
-        if: ${{ runner.os == 'Windows' && matrix.install_cuda }}
+        if: ${{ runner.os == 'Windows' }}
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -171,7 +171,26 @@ jobs:
       - name: Install Tauri CLI (cargo tauri)
         run: cargo install tauri-cli --version 2.0.0 --locked
 
-      - name: Build engine
+      - name: Build engine (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.cuda_compute_cap || '' }}
+          CANDLE_CUDA_ARCH_LIST: ${{ matrix.candle_cuda_arch_list || '' }}
+          CANDLE_CUDA_PTX_ARCH: ${{ matrix.candle_cuda_ptx_arch || '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Git Bash ships a GNU link.exe that can shadow the MSVC linker in PATH.
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\Git\\usr\\bin$' }) -join ';'
+          $features = "${{ matrix.engine_features }}"
+          if ($features) {
+            cargo build -p voxcpm_engine --bin engine --release --target "${{ matrix.rust_target }}" --features "$features"
+          } else {
+            cargo build -p voxcpm_engine --bin engine --release --target "${{ matrix.rust_target }}"
+          }
+
+      - name: Build engine (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         env:
           CUDA_COMPUTE_CAP: ${{ matrix.cuda_compute_cap || '' }}
@@ -186,7 +205,19 @@ jobs:
             cargo build -p voxcpm_engine --bin engine --release --target "${{ matrix.rust_target }}"
           fi
 
-      - name: Bundle engine as Tauri sidecar
+      - name: Bundle engine as Tauri sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binDir = 'crates/voxcpm_desktop/src-tauri/binaries'
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          $src = "target/${{ matrix.rust_target }}/release/engine${{ matrix.exe_ext }}"
+          $dst = "$binDir/engine-${{ matrix.rust_target }}${{ matrix.exe_ext }}"
+          Copy-Item -Force $src $dst
+
+      - name: Bundle engine as Tauri sidecar (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euxo pipefail
@@ -196,7 +227,18 @@ jobs:
           DST="$BIN_DIR/engine-${{ matrix.rust_target }}${{ matrix.exe_ext }}"
           cp "$SRC" "$DST"
 
-      - name: Build Tauri bundle
+      - name: Build Tauri bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Avoid GNU link.exe from Git Bash.
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\Git\\usr\\bin$' }) -join ';'
+          cargo tauri build --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
+        working-directory: crates/voxcpm_desktop/src-tauri
+
+      - name: Build Tauri bundle (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euxo pipefail
