@@ -12,6 +12,10 @@ fn main() {
     // Used by bindgen_cuda; set this in CI to avoid calling nvidia-smi.
     println!("cargo:rerun-if-env-changed=CUDA_COMPUTE_CAP");
 
+    // Keep Rust-side and CUDA-side consistent: this fork intentionally disables MoE kernels.
+    // We use this cfg to provide stub symbols for candle-nn so Windows/MSVC linking works.
+    println!("cargo:rustc-cfg=candle_disable_moe");
+
     // Build for PTX
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let ptx_path = out_dir.join("ptx.rs");
