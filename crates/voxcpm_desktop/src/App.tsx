@@ -412,12 +412,14 @@ export default function App() {
         inferenceSteps={inferenceSteps}
         progress={progress}
         audioUrl={audioUrl}
-        log={log}
         isGenerating={isGenerating}
-        onPickReferenceAudio={async (file) => {
-          setReferenceAudioName(file.name)
-          const buf = await file.arrayBuffer()
-          setReferenceAudioBytes(new Uint8Array(buf))
+        onPickReferenceAudioBytes={({ name, bytes }) => {
+          setReferenceAudioName(name)
+          setReferenceAudioBytes(bytes)
+        }}
+        onClearReferenceAudio={() => {
+          setReferenceAudioName(null)
+          setReferenceAudioBytes(null)
         }}
         onChangeReferenceText={setReferenceText}
         onChangeTargetText={setTargetText}

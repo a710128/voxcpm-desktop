@@ -16,6 +16,7 @@
         "title": "VoxCPM Desktop",
         "width": 960,
         "height": 720,
+        "dragDropEnabled": false,
         "resizable": false,
         "maximizable": false,
         "fullscreen": false,

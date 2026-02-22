@@ -70,6 +70,120 @@ body {
   padding: var(--s-6);
 }
 
+/* WorkspaceScreen: slightly tighter spacing without affecting other screens. */
+.container.workspaceScreen {
+  padding: var(--s-5);
+}
+
+.workspaceScreen .grid2 {
+  gap: var(--s-5);
+  /* Output card moves below; Workspace main is single column. */
+  grid-template-columns: 1fr;
+}
+
+.workspaceScreen .stack {
+  gap: var(--s-5);
+}
+
+.workspaceScreen .refTargetGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--s-5);
+  align-items: start;
+}
+
+/* Tauri window width is fixed to 960px; start 2-col earlier. */
+@media (min-width: 900px) {
+  .workspaceScreen .refTargetGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.workspaceScreen .cardHeader {
+  /* Compact header height for Workspace only. */
+  padding: 14px 20px;
+  gap: 10px;
+  align-items: center;
+}
+
+.workspaceScreen .cardHeader .muted {
+  /* Subtitle is visually secondary; keep it tight. */
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.workspaceScreen .chip {
+  /* Chips contribute a lot to header height; shrink via padding. */
+  font-size: 11px;
+  padding: 4px 8px;
+  line-height: 1.2;
+}
+
+.workspaceScreen .cardBody {
+  /* Reduce vertical whitespace inside cards. */
+  padding: 16px 20px;
+}
+
+.workspaceScreen .cardFooter {
+  padding: 20px;
+  gap: 10px;
+}
+
+.workspaceScreen .label {
+  margin-bottom: 6px;
+}
+
+.workspaceScreen .field {
+  margin-top: 10px;
+}
+
+.workspaceScreen .input,
+.workspaceScreen .textarea {
+  font-size: 16px;
+  line-height: 1.35;
+  padding: 9px 12px;
+}
+
+.workspaceScreen .dropzone {
+  padding: 20px;
+}
+
+.workspaceScreen .dropzoneLoaded {
+  padding: 10px;
+}
+
+.workspaceScreen .waveform {
+  height: 80px;
+}
+
+.workspaceScreen .wfPlayer {
+  gap: 8px;
+}
+
+.workspaceScreen .wfControls {
+  gap: 10px;
+}
+
+.workspaceScreen .wfLeft,
+.workspaceScreen .wfCenter,
+.workspaceScreen .wfRight {
+  gap: 8px;
+}
+
+.workspaceScreen .wfBtn {
+  width: 34px;
+  height: 34px;
+}
+
+.workspaceScreen .wfBtnPrimary {
+  width: 40px;
+  height: 40px;
+}
+
+.workspaceScreen .progressBlock {
+  margin-top: var(--s-3);
+}
+
 .containerNarrow {
   max-width: 820px;
 }
@@ -218,6 +332,14 @@ body {
   color: var(--text);
 }
 
+/* Input-like textarea that wraps and auto-grows. */
+.inputWrap {
+  resize: none;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .textarea {
   resize: vertical;
 }
@@ -346,6 +468,384 @@ input[type="radio"]:focus-visible {
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.fileInputHidden {
+  display: none;
+}
+
+.dropzone {
+  border: 1px dashed rgba(15, 23, 42, 0.22);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, rgba(59, 91, 253, 0.06), rgba(22, 199, 154, 0.04));
+  padding: var(--s-5);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background 120ms ease;
+}
+
+.dropzoneClickable {
+  cursor: pointer;
+}
+
+.dropzone:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-color: rgba(59, 91, 253, 0.55);
+}
+
+.dropzoneDragging {
+  border-color: rgba(59, 91, 253, 0.6);
+  background: linear-gradient(180deg, rgba(59, 91, 253, 0.10), rgba(22, 199, 154, 0.06));
+}
+
+.dropzoneLoaded {
+  border-style: solid;
+  border-color: rgba(15, 23, 42, 0.14);
+  background: var(--panel-2);
+  padding: var(--s-3);
+}
+
+.dropzoneError {
+  border-color: rgba(229, 72, 77, 0.6);
+  background: rgba(229, 72, 77, 0.06);
+}
+
+.dropzoneTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-4);
+}
+
+.dropzoneTitle {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.dropzoneHint {
+  margin-top: 2px;
+}
+
+.fileName {
+  margin-top: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waveform {
+  position: relative;
+  height: 92px;
+  background: var(--panel);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.waveformScroll {
+  width: 100%;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-gutter: stable both-edges;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
+  position: relative;
+}
+
+/* Create horizontal scroll width without stretching the canvas. */
+.waveformScroll::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 1px;
+  width: var(--wave-content-w, 100%);
+  pointer-events: none;
+}
+
+.waveformCanvasSticky {
+  position: sticky;
+  left: 0;
+  top: 0;
+}
+
+.refWaveWrap {
+  margin-top: 0;
+}
+
+.waveformCanvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.waveformOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.refClear {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.audioEl {
+  display: none;
+}
+
+.wfPlayer {
+  display: grid;
+  grid-template-areas:
+    "wave"
+    "times"
+    "controls";
+  gap: 10px;
+}
+
+.wfWave {
+  grid-area: wave;
+  cursor: pointer;
+}
+
+.wfWave:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-color: rgba(59, 91, 253, 0.55);
+}
+
+.wfTimes {
+  grid-area: times;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: rgba(17, 24, 39, 0.60);
+  padding: 0 2px;
+}
+
+.wfControls {
+  grid-area: controls;
+  display: grid;
+  grid-template-areas: "left center right";
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.wfLeft {
+  grid-area: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wfCenter {
+  grid-area: center;
+  display: inline-flex;
+  align-items: center;
+  justify-self: center;
+  gap: 10px;
+}
+
+.wfRight {
+  grid-area: right;
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: 10px;
+}
+
+.wfBtn {
+  height: 36px;
+  width: 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: rgba(255, 255, 255, 0.70);
+  color: rgba(17, 24, 39, 0.82);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.wfBtn:hover {
+  background: rgba(255, 255, 255, 0.88);
+  border-color: rgba(15, 23, 42, 0.18);
+}
+
+.wfBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.wfBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.wfBtnPrimary {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: var(--accent);
+  border-color: rgba(59, 91, 253, 0.55);
+  color: white;
+}
+
+.wfBtnPrimary:hover {
+  background: #2f4bfa;
+}
+
+.wfPill {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: rgba(17, 24, 39, 0.80);
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.wfPill:hover {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(15, 23, 42, 0.18);
+}
+
+.wfPill:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.wfPill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.wfIcon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.wfBtnPrimary .wfIcon {
+  width: 20px;
+  height: 20px;
+  stroke: rgba(255, 255, 255, 0.95);
+}
+
+.wfVolumeWrap {
+  position: relative;
+}
+
+.wfVolumePopover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: var(--shadow-2);
+  z-index: 10;
+}
+
+.wfVolMute {
+  height: 32px;
+  width: 32px;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: rgba(15, 23, 42, 0.02);
+  color: rgba(17, 24, 39, 0.82);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.wfVolMute:hover {
+  background: rgba(15, 23, 42, 0.05);
+}
+
+.wfVolRange {
+  width: 180px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: rgba(15, 23, 42, 0.08);
+  padding: 0 8px;
+}
+
+.wfVolRange:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.wfVolRange::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid rgba(15, 23, 42, 0.22);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.10);
+}
+
+.wfVolRange::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid rgba(15, 23, 42, 0.22);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.10);
+}
+
+.refClear:hover {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(15, 23, 42, 0.20);
+}
+
+.refClear:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .log {
