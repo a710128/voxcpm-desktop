@@ -1,0 +1,173 @@
+name: ci-build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows
+          - name: windows-x64-cpu
+            runs_on: windows-latest
+            variant: cpu
+            rust_target: x86_64-pc-windows-msvc
+            exe_ext: .exe
+            engine_features: ''
+            bundles: nsis
+            install_cuda: false
+
+          - name: windows-x64-cuda12_2
+            runs_on: windows-latest
+            variant: cuda12_2
+            rust_target: x86_64-pc-windows-msvc
+            exe_ext: .exe
+            engine_features: cuda
+            bundles: nsis
+            install_cuda: true
+
+          # Linux
+          - name: linux-x64-cpu
+            runs_on: ubuntu-22.04
+            variant: cpu
+            rust_target: x86_64-unknown-linux-gnu
+            exe_ext: ''
+            engine_features: ''
+            bundles: appimage
+            install_cuda: false
+
+          - name: linux-x64-cuda12_2
+            runs_on: ubuntu-22.04
+            variant: cuda12_2
+            rust_target: x86_64-unknown-linux-gnu
+            exe_ext: ''
+            engine_features: cuda
+            bundles: appimage
+            install_cuda: true
+
+          # macOS (split by arch)
+          - name: macos-arm64-metal
+            runs_on: macos-14
+            variant: metal
+            rust_target: aarch64-apple-darwin
+            exe_ext: ''
+            engine_features: metal
+            bundles: dmg
+            install_cuda: false
+
+          - name: macos-x64-metal
+            runs_on: macos-13
+            variant: metal
+            rust_target: x86_64-apple-darwin
+            exe_ext: ''
+            engine_features: metal
+            bundles: dmg
+            install_cuda: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: crates/voxcpm_desktop/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/voxcpm_desktop/src-tauri -> crates/voxcpm_desktop/src-tauri/target
+
+      - name: Install Linux system deps (Tauri)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2
+
+      - name: Install CUDA Toolkit (for CUDA variants)
+        if: ${{ matrix.install_cuda }}
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: '12.2.0'
+          method: 'network'
+          log-file-suffix: '${{ matrix.name }}.txt'
+
+      - name: Print CUDA environment
+        if: ${{ matrix.install_cuda }}
+        shell: bash
+        run: |
+          echo "CUDA_PATH=${CUDA_PATH}"
+          nvcc -V || true
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: crates/voxcpm_desktop
+
+      - name: Install Tauri CLI (cargo tauri)
+        run: cargo install tauri-cli --version 2.0.0 --locked
+
+      - name: Build engine
+        shell: bash
+        run: |
+          set -euxo pipefail
+          FEATURES="${{ matrix.engine_features }}"
+          if [[ -n "$FEATURES" ]]; then
+            cargo build -p voxcpm_engine --bin engine --release --target "${{ matrix.rust_target }}" --features "$FEATURES"
+          else
+            cargo build -p voxcpm_engine --bin engine --release --target "${{ matrix.rust_target }}"
+          fi
+
+      - name: Bundle engine as Tauri sidecar
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BIN_DIR="crates/voxcpm_desktop/src-tauri/binaries"
+          mkdir -p "$BIN_DIR"
+          SRC="target/${{ matrix.rust_target }}/release/engine${{ matrix.exe_ext }}"
+          DST="$BIN_DIR/engine-${{ matrix.rust_target }}${{ matrix.exe_ext }}"
+          cp "$SRC" "$DST"
+
+      - name: Build Tauri bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo tauri build --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
+        working-directory: crates/voxcpm_desktop/src-tauri
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoxCPM_Desktop-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            crates/voxcpm_desktop/src-tauri/target/**/release/bundle/**
