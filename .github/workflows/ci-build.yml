@@ -12,7 +12,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  TAURI_CLI_VERSION: '2.0.0'
 
 jobs:
   build:
@@ -157,20 +156,8 @@ jobs:
         run: npm ci
         working-directory: crates/voxcpm_desktop
 
-      - name: Cache Tauri CLI
-        id: cache-tauri-cli
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-tauri
-            ~/.cargo/bin/cargo-tauri.exe
-            ~/.cargo/bin/tauri
-            ~/.cargo/bin/tauri.exe
-          key: tauri-cli-${{ runner.os }}-${{ env.TAURI_CLI_VERSION }}
-
       - name: Install Tauri CLI (cargo tauri)
-        if: steps.cache-tauri-cli.outputs.cache-hit != 'true'
-        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+        run: cargo install tauri-cli --version 2.0.0 --locked
 
       - name: Build engine
         shell: bash
