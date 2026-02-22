@@ -1,17 +1,19 @@
 name: ci-build
 
 on:
-  push:
-  pull_request:
-  workflow_dispatch:
+  release:
+    types: [published, prereleased]
 
 concurrency:
-  group: ci-build-${{ github.ref }}
+  group: ci-build-${{ github.event.release.tag_name }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -93,6 +95,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -266,11 +270,49 @@ jobs:
           cargo tauri build --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
         working-directory: crates/voxcpm_desktop/src-tauri
 
-      - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: VoxCPM_Desktop-${{ matrix.name }}
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            crates/voxcpm_desktop/src-tauri/target/**/release/bundle/**
+      - name: Upload release asset (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "${{ github.event.release.tag_name }}"
+          $version = $tag -replace '^v',''
+          $bundleDir = "crates/voxcpm_desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis"
+          $exe = Get-ChildItem -Path $bundleDir -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw "NSIS bundle not found in $bundleDir" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $asset = "VoxCPM_Desktop-$version-${{ matrix.name }}.exe"
+          Copy-Item -Force $exe.FullName (Join-Path dist $asset)
+          gh release upload "$tag" (Join-Path dist $asset) --clobber --repo "${{ github.repository }}"
+
+      - name: Upload release asset (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          TAG='${{ github.event.release.tag_name }}'
+          VERSION="${TAG#v}"
+          DMG_PATH=$(ls -1 crates/voxcpm_desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg | head -n 1)
+          mkdir -p dist
+          ASSET="VoxCPM_Desktop-${VERSION}-${{ matrix.name }}.dmg"
+          cp -f "$DMG_PATH" "dist/$ASSET"
+          gh release upload "$TAG" "dist/$ASSET" --clobber --repo "${{ github.repository }}"
+
+      - name: Upload release asset (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          TAG='${{ github.event.release.tag_name }}'
+          VERSION="${TAG#v}"
+          APPIMAGE_PATH=$(ls -1 crates/voxcpm_desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/appimage/*.AppImage | head -n 1)
+          mkdir -p dist
+          ASSET="VoxCPM_Desktop-${VERSION}-${{ matrix.name }}.AppImage"
+          cp -f "$APPIMAGE_PATH" "dist/$ASSET"
+          gh release upload "$TAG" "dist/$ASSET" --clobber --repo "${{ github.repository }}"
