@@ -35,14 +35,15 @@ jobs:
             bundles: nsis
             install_cuda: false
 
-          - name: windows-x64-cuda12_2
-            runs_on: windows-latest
-            variant: cuda12_2
+          - name: windows-x64-cuda12_4
+            runs_on: windows-2022
+            variant: cuda12_4
             rust_target: x86_64-pc-windows-msvc
             exe_ext: .exe
             engine_features: cuda
             bundles: nsis
             install_cuda: true
+            cuda_version: '12.4.1'
             cuda_compute_cap: '61'
             candle_cuda_arch_list: '61,70,75,80,86,89,90'
             candle_cuda_ptx_arch: '61'
@@ -141,7 +142,7 @@ jobs:
         if: ${{ matrix.install_cuda }}
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
-          cuda: '12.2.0'
+          cuda: ${{ matrix.cuda_version || '12.2.0' }}
           method: 'network'
           log-file-suffix: '${{ matrix.name }}.txt'
 
