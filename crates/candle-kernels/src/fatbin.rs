@@ -1,0 +1,11 @@
+pub const AFFINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/affine.fatbin"));
+pub const BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/binary.fatbin"));
+pub const CAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cast.fatbin"));
+pub const CONV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv.fatbin"));
+pub const FILL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fill.fatbin"));
+pub const INDEXING: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/indexing.fatbin"));
+pub const QUANTIZED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quantized.fatbin"));
+pub const REDUCE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/reduce.fatbin"));
+pub const SORT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sort.fatbin"));
+pub const TERNARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ternary.fatbin"));
+pub const UNARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unary.fatbin"));

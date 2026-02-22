@@ -257,7 +257,15 @@ impl CudaDevice {
         }
         drop(ms);
         let mut ms = self.modules.write().unwrap();
-        let cuda_module = self.context.load_module(mdl.ptx().into()).w()?;
+        // Prefer fatbin: driver will pick matching SASS; otherwise it can JIT from embedded PTX.
+        // Fallback to PTX text if binary module load fails.
+        let cuda_module = match self
+            .context
+            .load_module(cudarc::nvrtc::Ptx::from_binary(mdl.fatbin().to_vec()))
+        {
+            Ok(m) => m,
+            Err(_) => self.context.load_module(mdl.ptx().into()).w()?,
+        };
         ms.mdls[mdl.index()] = Some(cuda_module.clone());
         let func = cuda_module.load_function(fn_name).w()?;
         Ok(CudaFunc {

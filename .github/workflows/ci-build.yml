@@ -39,6 +39,9 @@ jobs:
             engine_features: cuda
             bundles: nsis
             install_cuda: true
+            cuda_compute_cap: '61'
+            candle_cuda_arch_list: '61,70,75,80,86,89,90'
+            candle_cuda_ptx_arch: '61'
 
           # Linux
           - name: linux-x64-cpu
@@ -58,6 +61,9 @@ jobs:
             engine_features: cuda
             bundles: appimage
             install_cuda: true
+            cuda_compute_cap: '61'
+            candle_cuda_arch_list: '61,70,75,80,86,89,90'
+            candle_cuda_ptx_arch: '61'
 
           # macOS (split by arch)
           - name: macos-arm64-metal
@@ -150,6 +156,10 @@ jobs:
 
       - name: Build engine
         shell: bash
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.cuda_compute_cap || '' }}
+          CANDLE_CUDA_ARCH_LIST: ${{ matrix.candle_cuda_arch_list || '' }}
+          CANDLE_CUDA_PTX_ARCH: ${{ matrix.candle_cuda_ptx_arch || '' }}
         run: |
           set -euxo pipefail
           FEATURES="${{ matrix.engine_features }}"

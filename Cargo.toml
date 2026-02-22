@@ -17,3 +17,4 @@ default-members = [
 
 [patch.crates-io]
 candle-core = { path = "crates/candle-core" }
+candle-kernels = { path = "crates/candle-kernels" }
