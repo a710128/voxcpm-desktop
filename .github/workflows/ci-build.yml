@@ -18,6 +18,10 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on }}
+    env:
+      # Some dependencies (e.g. ring) rely on Apple AArch64 baseline target features.
+      # Apply any target-specific flags via matrix to keep changes localized.
+      RUSTFLAGS: ${{ matrix.rustflags || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +79,7 @@ jobs:
             engine_features: metal
             bundles: dmg
             install_cuda: false
+            rustflags: '-C target-cpu=apple-m1'
 
           - name: macos-x64-metal
             runs_on: macos-15-intel
