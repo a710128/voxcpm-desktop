@@ -94,6 +94,19 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      - name: Diagnostics (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustc -Vv
+          cargo -Vv
+          echo "RUSTFLAGS=${RUSTFLAGS-}"
+          echo "CARGO_ENCODED_RUSTFLAGS=${CARGO_ENCODED_RUSTFLAGS-}"
+          echo "TARGET=${{ matrix.rust_target }}"
+          # ring relies on Rust target_feature cfg on Apple AArch64.
+          rustc --print cfg --target "${{ matrix.rust_target }}" | grep '^target_feature=' || true
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
