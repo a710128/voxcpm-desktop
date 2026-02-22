@@ -1,5 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
+import { save } from '@tauri-apps/plugin-dialog'
+import { writeFile } from '@tauri-apps/plugin-fs'
+
 import type { ProgressEventPayload } from '../types'
 
 export function WorkspaceScreen(props: {
@@ -37,6 +40,8 @@ export function WorkspaceScreen(props: {
   const [outWavePeaks, setOutWavePeaks] = useState<Float32Array | null>(null)
   const [outWaveError, setOutWaveError] = useState<string | null>(null)
   const [isOutDecoding, setIsOutDecoding] = useState<boolean>(false)
+
+  const [isSavingOut, setIsSavingOut] = useState<boolean>(false)
 
   function useAutoGrowTextarea(value: string, maxRows: number) {
     const ref = useRef<HTMLTextAreaElement | null>(null)
@@ -261,6 +266,11 @@ export function WorkspaceScreen(props: {
     return ms / 1000
   }, [props.progress])
 
+  const generatedSecForOverlay = useMemo(() => {
+    if (!props.isGenerating) return null
+    return generatedSec ?? 0
+  }, [generatedSec, props.isGenerating])
+
   const requireRefText = props.referenceAudioName != null
   const refTextOk = props.referenceText.trim().length > 0
   const canGenerate = props.targetText.trim().length > 0 && (!requireRefText || refTextOk) && !props.isGenerating
@@ -361,12 +371,45 @@ export function WorkspaceScreen(props: {
     return `${m}:${String(r).padStart(2, '0')}`
   }
 
+  function makeDefaultOutFileName() {
+    const d = new Date()
+    const pad2 = (n: number) => String(n).padStart(2, '0')
+    const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(
+      d.getMinutes(),
+    )}${pad2(d.getSeconds())}`
+    return `voxcpm-${stamp}.wav`
+  }
+
+  async function onSaveOutput() {
+    if (!props.audioUrl) return
+    setIsSavingOut(true)
+    try {
+      const path = await save({
+        defaultPath: makeDefaultOutFileName(),
+        filters: [{ name: 'WAV audio', extensions: ['wav'] }],
+      })
+      if (!path) return
+
+      // audioUrl is a blob: URL created from the raw wav bytes in App.tsx.
+      const res = await fetch(props.audioUrl)
+      const buf = await res.arrayBuffer()
+      await writeFile(path, new Uint8Array(buf))
+    } catch (e) {
+      console.error('[voxcpm] save output failed', e)
+    } finally {
+      setIsSavingOut(false)
+    }
+  }
+
   function WaveformPlayer(p: {
     label: string
     src: string | null
     peaks: Float32Array | null
     canvasRef: { current: HTMLCanvasElement | null }
     isDecoding: boolean
+    overlayLabel?: string | null
+    onSave?: () => void
+    isSaving?: boolean
     onClear?: () => void
   }) {
     const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -693,7 +736,7 @@ export function WorkspaceScreen(props: {
     }
 
     function Icon(p2: {
-      name: 'play' | 'pause' | 'skipBack' | 'skipFwd' | 'volume' | 'muted' | 'reset'
+      name: 'play' | 'pause' | 'skipBack' | 'skipFwd' | 'volume' | 'muted' | 'reset' | 'download'
     }) {
       const common = { className: 'wfIcon', viewBox: '0 0 24 24', 'aria-hidden': true as const }
       switch (p2.name) {
@@ -747,6 +790,14 @@ export function WorkspaceScreen(props: {
               <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
             </svg>
           )
+        case 'download':
+          return (
+            <svg {...common}>
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <path d="M7 10l5 5 5-5" />
+              <path d="M12 15V3" />
+            </svg>
+          )
       }
     }
 
@@ -775,7 +826,23 @@ export function WorkspaceScreen(props: {
           >
             <canvas ref={p.canvasRef as any} className="waveformCanvas waveformCanvasSticky" />
           </div>
-          {p.isDecoding ? <div className="waveformOverlay muted small">Rendering waveform…</div> : null}
+          {(() => {
+            const overlay = p.overlayLabel ?? (p.isDecoding ? 'Rendering waveform' : p.src ? null : 'No audio')
+            if (!overlay) return null
+
+            return (
+              <div className="waveformOverlay muted small">
+                {overlay.startsWith('Generating') ? (
+                  <span className="wfOverlayRow">
+                    <span className="wfSpinner" aria-hidden={true} />
+                    <span>{overlay}</span>
+                  </span>
+                ) : (
+                  <span>{overlay}</span>
+                )}
+              </div>
+            )
+          })()}
         </div>
 
         <div className="wfTimes" aria-label="Time">
@@ -846,6 +913,18 @@ export function WorkspaceScreen(props: {
           </div>
 
           <div className="wfRight">
+            {p.onSave ? (
+              <button
+                type="button"
+                className="wfBtn"
+                onClick={p.onSave}
+                disabled={!p.src || p.isSaving}
+                aria-label={p.isSaving ? 'Saving output audio' : 'Save output audio'}
+                title={p.isSaving ? 'Saving…' : 'Save'}
+              >
+                {p.isSaving ? <span className="wfSpinner" aria-hidden={true} /> : <Icon name="download" />}
+              </button>
+            ) : null}
             {p.onClear ? (
               <button type="button" className="wfBtn" onClick={p.onClear} aria-label="Clear" title="Clear">
                 <Icon name="reset" />
@@ -979,7 +1058,7 @@ export function WorkspaceScreen(props: {
             </div>
           </div>
 
-          <div className="card">
+          <div className="card targetCard">
             <div className="cardHeader">
               <div>
                 <div className="h2">Target</div>
@@ -1059,7 +1138,7 @@ export function WorkspaceScreen(props: {
           </div>
         </div>
 
-        <div className="card">
+        <div className="card outputCard">
           <div className="cardHeader">
             <div>
               <div className="h2">Output</div>
@@ -1067,43 +1146,17 @@ export function WorkspaceScreen(props: {
             </div>
           </div>
           <div className="cardBody">
-            <div className="progressBlock">
-              <div className="progressTop">
-                <div className="label">Generation</div>
-                <div className="muted">
-                  {generatedSec != null ? `~${generatedSec.toFixed(2)}s` : props.isGenerating ? '…' : ''}
-                </div>
-              </div>
-              <div
-                className={props.isGenerating && generatedSec == null ? 'timeRuler indeterminate' : 'timeRuler'}
-                role="progressbar"
-                aria-label="Generated seconds"
-                aria-valuetext={props.isGenerating && generatedSec == null ? 'Generating' : undefined}
-              >
-                {generatedSec == null ? null : (
-                  <div
-                    className="timeFill"
-                    style={{ width: `${Math.min(100, Math.max(0, (generatedSec / 10) * 100))}%` }}
-                  />
-                )}
-              </div>
-              <div className="muted small">(visual scale: 10s = 100%)</div>
-            </div>
-
-            {props.audioUrl ? (
-              <>
-                <WaveformPlayer
-                  label="Output"
-                  src={props.audioUrl}
-                  peaks={outWavePeaks}
-                  canvasRef={outWaveCanvasRef}
-                  isDecoding={isOutDecoding}
-                />
-                {outWaveError ? <div className="error">Waveform failed: {outWaveError}</div> : null}
-              </>
-            ) : (
-              <div className="muted">No audio yet.</div>
-            )}
+            <WaveformPlayer
+              label="Output"
+              src={props.audioUrl}
+              peaks={outWavePeaks}
+              canvasRef={outWaveCanvasRef}
+              isDecoding={props.isGenerating || isOutDecoding}
+              overlayLabel={props.isGenerating ? `Generating ${formatTime(generatedSecForOverlay)}` : null}
+              onSave={() => void onSaveOutput()}
+              isSaving={isSavingOut}
+            />
+            {outWaveError ? <div className="error">Waveform failed: {outWaveError}</div> : null}
 
             {/* Log intentionally hidden in Workspace UI (still collected in App state). */}
           </div>

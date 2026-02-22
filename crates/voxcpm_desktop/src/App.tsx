@@ -254,14 +254,25 @@ export default function App() {
       audioUrlRef.current = null
     }
     setAudioUrl(null)
+    // Debug-only visibility: Workspace hides the log panel, so surface failures in console.
+    console.info('[voxcpm] generate: start', {
+      deviceSpec,
+      targetTextLen: targetText.trim().length,
+      hasReferenceAudio: referenceAudioBytes != null,
+      referenceTextLen: referenceText.trim().length,
+      cfgValue,
+      inferenceSteps,
+    })
     try {
       const wavBytes = await invoke<Uint8Array>('generate_v1', {
-        deviceSpec,
-        targetText,
-        referenceAudioBytes: referenceAudioBytes ? Array.from(referenceAudioBytes) : null,
-        referenceText: referenceText.trim() === '' ? null : referenceText,
-        cfgValue,
-        inferenceSteps,
+        params: {
+          deviceSpec,
+          targetText,
+          referenceAudioBytes: referenceAudioBytes ? Array.from(referenceAudioBytes) : null,
+          referenceText: referenceText.trim() === '' ? null : referenceText,
+          cfgValue,
+          inferenceSteps,
+        },
       })
       // Tauri returns an Uint8Array-like object (typing may vary across TS libdefs).
       const blob = new Blob([wavBytes as any], { type: 'audio/wav' })
@@ -269,8 +280,18 @@ export default function App() {
       audioUrlRef.current = url
       setAudioUrl(url)
     } catch (e) {
+      console.error('[voxcpm] generate: failed', {
+        error: e,
+        deviceSpec,
+        targetText,
+        hasReferenceAudio: referenceAudioBytes != null,
+        referenceText,
+        cfgValue,
+        inferenceSteps,
+      })
       setLog((prev) => prev + `\nGenerate failed: ${String(e)}\n`)
     } finally {
+      console.info('[voxcpm] generate: end')
       setIsGenerating(false)
     }
   }

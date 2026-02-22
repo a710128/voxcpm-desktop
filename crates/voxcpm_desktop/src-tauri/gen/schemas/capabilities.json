@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability for the main window","local":true,"windows":["main"],"permissions":["core:default",{"identifier":"shell:allow-spawn","allow":[{"args":true,"name":"binaries/engine","sidecar":true}]}]}}
+{"default":{"identifier":"default","description":"Default capability for the main window","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-save","fs:allow-write-file",{"identifier":"shell:allow-spawn","allow":[{"args":true,"name":"binaries/engine","sidecar":true}]}]}}

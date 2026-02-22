@@ -47,6 +47,14 @@ body {
   height: 100%;
 }
 
+/* Desktop app: avoid page-level scrolling (use explicit scroll areas if needed). */
+html,
+body,
+#root {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   font-family: var(--font-body);
@@ -76,19 +84,19 @@ body {
 }
 
 .workspaceScreen .grid2 {
-  gap: var(--s-5);
+  gap: var(--s-4);
   /* Output card moves below; Workspace main is single column. */
   grid-template-columns: 1fr;
 }
 
 .workspaceScreen .stack {
-  gap: var(--s-5);
+  gap: var(--s-4);
 }
 
 .workspaceScreen .refTargetGrid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: var(--s-5);
+  gap: var(--s-4);
   align-items: start;
 }
 
@@ -124,9 +132,27 @@ body {
   padding: 16px 20px;
 }
 
+/* Workspace: tighten non-output card body top padding. */
+.workspaceScreen .card:not(.outputCard) > .cardBody {
+  padding-top: 10px;
+}
+
 .workspaceScreen .cardFooter {
   padding: 20px;
   gap: 10px;
+}
+
+/* Workspace Target card: reduce footer vertical padding. */
+.workspaceScreen .targetCard .cardFooter {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+/* Workspace Target card: flatter Generate/Stop buttons. */
+.workspaceScreen .targetCard .cardFooter .btn {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
 }
 
 .workspaceScreen .label {
@@ -135,6 +161,11 @@ body {
 
 .workspaceScreen .field {
   margin-top: 10px;
+}
+
+/* Workspace Target card: no top margin above Target text field. */
+.workspaceScreen .targetCard .cardBody > .field:first-child {
+  margin-top: 0;
 }
 
 .workspaceScreen .input,
@@ -337,7 +368,9 @@ body {
   resize: none;
   overflow-x: hidden;
   white-space: pre-wrap;
-  word-break: break-word;
+  /* Aggressive wrapping: allow line breaks at any character (incl. within words). */
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 .textarea {
@@ -589,7 +622,9 @@ input[type="radio"]:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.55);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.58));
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
 }
 
 .refClear {
@@ -622,6 +657,27 @@ input[type="radio"]:focus-visible {
     "times"
     "controls";
   gap: 10px;
+}
+
+.wfOverlayRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wfSpinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid rgba(15, 23, 42, 0.16);
+  border-top-color: rgba(59, 91, 253, 0.95);
+  animation: wfSpin 700ms linear infinite;
+}
+
+@keyframes wfSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .wfWave {
@@ -677,6 +733,7 @@ input[type="radio"]:focus-visible {
   justify-self: end;
   gap: 10px;
 }
+
 
 .wfBtn {
   height: 36px;
@@ -1099,6 +1156,9 @@ input[type="radio"]:focus-visible {
     animation: none;
   }
   .timeRuler.indeterminate::after {
+    animation: none;
+  }
+  .wfSpinner {
     animation: none;
   }
 }

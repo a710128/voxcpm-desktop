@@ -466,6 +466,8 @@ async fn generate_v1(app: tauri::AppHandle, params: GenerateV1Params) -> Result<
 
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
