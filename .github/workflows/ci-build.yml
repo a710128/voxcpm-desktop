@@ -158,6 +158,26 @@ jobs:
         with:
           arch: x64
 
+      - name: Pin MSVC linker (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Ensure Cargo/rustc uses MSVC's linker, not Git-for-Windows' GNU link.exe.
+          $allLinks = Get-Command link.exe -All | Select-Object -ExpandProperty Source
+          $msvcLink = $allLinks | Where-Object { $_ -match '\\VC\\Tools\\MSVC\\' } | Select-Object -First 1
+          if (-not $msvcLink) {
+            throw "MSVC link.exe not found. Candidates: $($allLinks -join '; ')"
+          }
+
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$msvcLink" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CC=cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CXX=cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "Pinned MSVC linker: $msvcLink"
+          where.exe link.exe
+
       - name: Configure nvcc host compiler (Windows CUDA)
         if: ${{ runner.os == 'Windows' && matrix.install_cuda }}
         shell: pwsh
@@ -181,7 +201,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # Git Bash ships a GNU link.exe that can shadow the MSVC linker in PATH.
-          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\Git\\usr\\bin$' }) -join ';'
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\Git\\usr\\bin\\?$' }) -join ';'
           $features = "${{ matrix.engine_features }}"
           if ($features) {
             cargo build -p voxcpm_engine --bin engine --release --target "${{ matrix.rust_target }}" --features "$features"
@@ -233,7 +253,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # Avoid GNU link.exe from Git Bash.
-          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\Git\\usr\\bin$' }) -join ';'
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\Git\\usr\\bin\\?$' }) -join ';'
           cargo tauri build --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
         working-directory: crates/voxcpm_desktop/src-tauri
 
