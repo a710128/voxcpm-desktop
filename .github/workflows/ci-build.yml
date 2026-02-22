@@ -70,7 +70,7 @@ jobs:
             install_cuda: false
 
           - name: macos-x64-metal
-            runs_on: macos-13
+            runs_on: macos-15-intel
             variant: metal
             rust_target: x86_64-apple-darwin
             exe_ext: ''
