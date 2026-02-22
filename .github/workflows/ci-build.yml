@@ -137,21 +137,6 @@ jobs:
             patchelf \
             libfuse2
 
-      - name: macOS bundler prerequisites
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          xcode-select -p
-          # bundle_dmg.sh may call SetFile if a volume icon is used.
-          ls -la "/Applications/Xcode.app/Contents/Developer/Tools/SetFile" || true
-          # Ensure Xcode tools are on PATH.
-          echo "/Applications/Xcode.app/Contents/Developer/Tools" >> "$GITHUB_PATH"
-          echo "/Applications/Xcode.app/Contents/Developer/usr/bin" >> "$GITHUB_PATH"
-          which SetFile || true
-          which hdiutil
-          which osascript
-
       - name: Install CUDA Toolkit (for CUDA variants)
         if: ${{ matrix.install_cuda }}
         uses: Jimver/cuda-toolkit@v0.2.30
@@ -203,30 +188,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          # Increase verbosity to capture bundler script output.
-          TAURI_CLI_VERBOSITY=2 cargo tauri build -vv --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
+          cargo tauri build --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
         working-directory: crates/voxcpm_desktop/src-tauri
 
-      - name: Debug DMG bundler failure (macOS)
-        if: failure() && runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          DMG_DIR="crates/voxcpm_desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg"
-          ls -la "$DMG_DIR" || true
-          if [[ -f "$DMG_DIR/bundle_dmg.sh" ]]; then
-            echo "--- bundle_dmg.sh (first 200 lines) ---"
-            sed -n '1,200p' "$DMG_DIR/bundle_dmg.sh" || true
-          fi
-          echo "--- macOS tools ---"
-          which SetFile || true
-          which hdiutil || true
-          which osascript || true
-          xcode-select -p || true
-        working-directory: /Users/runner/work/voxcpm-desktop/voxcpm-desktop
-
       - name: Upload bundle artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: VoxCPM_Desktop-${{ matrix.name }}
