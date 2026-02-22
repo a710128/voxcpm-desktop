@@ -158,6 +158,12 @@ jobs:
         with:
           arch: x64
 
+      - name: Configure nvcc host compiler (Windows CUDA)
+        if: ${{ runner.os == 'Windows' && matrix.install_cuda }}
+        shell: pwsh
+        run: |
+          "NVCC_CCBIN=cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Install frontend dependencies
         run: npm ci
         working-directory: crates/voxcpm_desktop
@@ -168,7 +174,6 @@ jobs:
       - name: Build engine
         shell: bash
         env:
-          NVCC_CCBIN: ${{ runner.os == 'Windows' && matrix.install_cuda && 'cl.exe' || '' }}
           CUDA_COMPUTE_CAP: ${{ matrix.cuda_compute_cap || '' }}
           CANDLE_CUDA_ARCH_LIST: ${{ matrix.candle_cuda_arch_list || '' }}
           CANDLE_CUDA_PTX_ARCH: ${{ matrix.candle_cuda_ptx_arch || '' }}
