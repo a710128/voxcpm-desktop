@@ -446,7 +446,7 @@ impl MiniCpmAttention {
                 let attn = ops::softmax(&scores, D::Minus1)?;
                 attn.matmul(&v_all)? // [bs, h, 1, hd]
             }
-            Device::Cuda(_)  => {
+            Device::Cuda(_) => {
                 // GPU path avoids device->host sync by:
                 // - writing the cache with scatter_set (per-batch indices)
                 // - using a device-side mask over the full cache tensors

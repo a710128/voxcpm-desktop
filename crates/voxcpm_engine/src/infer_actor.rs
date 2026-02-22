@@ -313,6 +313,7 @@ impl ActorState {
             });
             let gen_args = GenerateArgs {
                 text: &req.text,
+                prompt_text: req.prompt_text.as_deref(),
                 prompt_wav: prompt_in,
                 seed: req.seed,
                 max_steps: req.max_steps,

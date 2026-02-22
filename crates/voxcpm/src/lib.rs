@@ -202,6 +202,11 @@ impl std::fmt::Debug for VoxCpmOptimizedRuntime {
 #[derive(Debug, Clone)]
 pub struct GenerateArgs<'a> {
     pub text: &'a str,
+    /// Reference text for `prompt_wav` (if provided).
+    ///
+    /// When both `prompt_wav` and `prompt_text` are set, VoxCPM will prepend the
+    /// reference text to `text` when building model inputs.
+    pub prompt_text: Option<&'a str>,
     pub prompt_wav: Option<WavInput<'a>>,
     pub seed: u64,
     pub max_steps: usize,
@@ -350,6 +355,7 @@ impl VoxCpm {
         // - `max_steps`: diffusion steps per patch.
         // - `max_len`: number of patches, heuristically bounded by text length.
         let n_timesteps = args.max_steps.max(1);
+        // Keep max_len heuristic based on target text only.
         let target_text_length = self.tokenizer.encode_ids(args.text)?.len();
         let mut max_len = (target_text_length as f64 * 6.0 + 10.0).ceil() as usize;
         max_len = max_len.min(2000).max(1);
@@ -360,8 +366,20 @@ impl VoxCpm {
 
         // Build aligned (text, mask, prompt-feat) inputs; only needs an immutable runtime view.
         let rt_ref = self.runtime.as_ref().unwrap();
+
+        // If prompt audio is provided, optionally prepend its transcript so the text side
+        // matches the audio prefix content.
+        let full_text_buf;
+        let full_text: &str = match (args.prompt_wav.as_ref(), args.prompt_text) {
+            (Some(_), Some(pt)) if !pt.is_empty() => {
+                full_text_buf = format!("{pt}{}", args.text);
+                &full_text_buf
+            }
+            _ => args.text,
+        };
+
         let (text_token, text_mask, audio_feat, audio_mask, audio_patch_count) =
-            self.build_inputs(args.text, args.prompt_wav.as_ref(), rt_ref)?;
+            self.build_inputs(full_text, args.prompt_wav.as_ref(), rt_ref)?;
 
         // After inputs are constructed, we only mutate the runtime state (KV caches).
         let rt = self.runtime.as_mut().unwrap();

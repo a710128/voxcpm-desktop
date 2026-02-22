@@ -84,6 +84,7 @@ fn main() {
 
     let args = GenerateArgs {
         text: &prompt,
+        prompt_text: None,
         prompt_wav: prompt_wav.as_deref().map(WavInput::Path),
         seed: 42,
         max_steps: 10,

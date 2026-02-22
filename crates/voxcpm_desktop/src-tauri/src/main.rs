@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{InvokeResponseBody, Response};
@@ -21,6 +21,16 @@ const HF_MIRROR_ENDPOINT: &str = "https://hf-mirror.com";
 
 fn next_job_id() -> u64 {
     NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn default_seed(job_id: u64) -> u64 {
+    // Keep this std-only (no extra deps). Goal: avoid constant seed when the UI doesn't pass one.
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    // Simple mixing to spread entropy across bits.
+    t ^ job_id.rotate_left(32) ^ job_id.wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +253,7 @@ async fn infer(window: tauri::WebviewWindow, params: InferParams) -> Result<Resp
 
     let job_id = next_job_id();
     st.active_generate_job_id.store(job_id, Ordering::Relaxed);
+    let seed = params.seed.unwrap_or_else(|| default_seed(job_id));
     let gen = st
         .engine
         .generate(
@@ -251,7 +262,7 @@ async fn infer(window: tauri::WebviewWindow, params: InferParams) -> Result<Resp
             params.text,
             prompt_bytes,
             None,
-            params.seed.unwrap_or(42),
+            seed,
             params.max_steps.unwrap_or(10),
             params.guidance_scale.unwrap_or(2.0),
             200,
@@ -446,6 +457,7 @@ async fn generate_v1(app: tauri::AppHandle, params: GenerateV1Params) -> Result<
 
     let job_id = next_job_id();
     st.active_generate_job_id.store(job_id, Ordering::Relaxed);
+    let seed = params.seed.unwrap_or_else(|| default_seed(job_id));
     let gen = st
         .engine
         .generate(
@@ -454,7 +466,7 @@ async fn generate_v1(app: tauri::AppHandle, params: GenerateV1Params) -> Result<
             target_text,
             prompt_wav_bytes,
             prompt_text,
-            params.seed.unwrap_or(42),
+            seed,
             params.inference_steps,
             params.cfg_value,
             200,
