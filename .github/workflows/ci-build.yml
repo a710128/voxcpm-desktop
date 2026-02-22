@@ -2,7 +2,7 @@ name: ci-build
 
 on:
   release:
-    types: [published, prereleased]
+    types: [published]
 
 concurrency:
   group: ci-build-${{ github.event.release.tag_name }}
