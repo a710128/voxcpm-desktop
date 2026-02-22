@@ -995,6 +995,36 @@ impl VoxCpm {
 }
 
 impl VoxCpmBuilder {
+    fn select_dtype(builder_dtype: Option<DType>, device: &Device, config: &VoxCpmConfig) -> DType {
+        // Explicit builder override always wins.
+        let mut dtype = if let Some(dtype) = builder_dtype {
+            dtype
+        } else {
+            #[cfg(feature = "cuda")]
+            if device.is_cuda() {
+                // sm < 80 -> fp16, sm >= 80 -> bf16. If we cannot query SM, default bf16.
+                return match cuda_sm(device.as_cuda_device().ok()) {
+                    Some(sm) if sm < 80 => DType::F16,
+                    Some(_) => DType::BF16,
+                    None => DType::BF16,
+                };
+            }
+
+            // Metal: default to fp32 (ignore config.json dtype).
+            if device.is_metal() {
+                DType::F32
+            } else {
+                config.dtype().unwrap_or(DType::BF16)
+            }
+        };
+
+        // CPU fallback: prefer fp32 for broad op coverage and stability.
+        if matches!(device, Device::Cpu) {
+            dtype = DType::F32;
+        }
+        dtype
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -1081,24 +1111,11 @@ impl VoxCpmBuilder {
         // Priority:
         // 1) Explicit builder override.
         // 2) CUDA: pick based on SM (ignore config.json dtype).
-        // 3) Non-CUDA: config.json dtype.
-        // 4) Default: BF16.
-        let mut dtype = self.dtype.unwrap_or_else(|| {
-            #[cfg(feature = "cuda")]
-            if device.is_cuda() {
-                // sm < 80 -> fp16, sm >= 80 -> bf16. If we cannot query SM, default bf16.
-                return match cuda_sm(device.as_cuda_device().ok()) {
-                    Some(sm) if sm < 80 => DType::F16,
-                    Some(_) => DType::BF16,
-                    None => DType::BF16,
-                };
-            }
-            config.dtype().unwrap_or(DType::BF16)
-        });
-        // CPU fallback: prefer fp32 for broad op coverage and stability.
-        if matches!(device, Device::Cpu) {
-            dtype = DType::F32;
-        }
+        // 3) Metal: default fp32 (ignore config.json dtype).
+        // 4) Other: config.json dtype.
+        // 5) Default: BF16.
+        // Note: CPU always forces fp32 for stability/op coverage.
+        let dtype = Self::select_dtype(self.dtype, &device, &config);
 
         // CUDA device init: keep behavior centralized here.
         #[cfg(feature = "cuda")]
@@ -1201,4 +1218,37 @@ fn cuda_sm(cuda: Option<&candle_core::cuda_backend::CudaDevice>) -> Option<u32> 
         return None;
     }
     Some((major as u32) * 10 + (minor as u32))
+}
+
+#[cfg(test)]
+mod dtype_tests {
+    use super::*;
+
+    #[test]
+    fn dtype_cpu_forces_f32_even_if_config_says_otherwise() -> Result<()> {
+        let config = VoxCpmConfig::from_json_str(r#"{"dtype":"bf16"}"#)?;
+        let dev = Device::Cpu;
+        let dtype = VoxCpmBuilder::select_dtype(None, &dev, &config);
+        assert_eq!(dtype, DType::F32);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn dtype_metal_defaults_to_fp32_and_ignores_config() -> Result<()> {
+        let config = VoxCpmConfig::from_json_str(r#"{"dtype":"fp32"}"#)?;
+
+        let Ok(dev) = Device::new_metal(0) else {
+            // No Metal device available in this environment.
+            return Ok(());
+        };
+
+        let dtype = VoxCpmBuilder::select_dtype(None, &dev, &config);
+        assert_eq!(dtype, DType::F32);
+
+        // Explicit override still wins.
+        let dtype = VoxCpmBuilder::select_dtype(Some(DType::F16), &dev, &config);
+        assert_eq!(dtype, DType::F16);
+        Ok(())
+    }
 }
