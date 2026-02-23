@@ -2,7 +2,7 @@
 
 target/
 
-VoxCPM/
+/VoxCPM/
 
 # Local-only numeric parity fixtures (Milestone 4 supplement)
 parity_out/

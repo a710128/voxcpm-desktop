@@ -456,15 +456,60 @@ mod tauri_sidecar {
     use tauri_plugin_shell::process::{CommandChild, CommandEvent};
     use tauri_plugin_shell::ShellExt;
 
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    use std::ffi::OsString;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn prepend_path_like(orig: Option<OsString>, prefix: &std::path::Path, sep: char) -> String {
+        let mut s = prefix.to_string_lossy().to_string();
+        if let Some(orig) = orig {
+            let orig = orig.to_string_lossy();
+            if !orig.is_empty() {
+                s.push(sep);
+                s.push_str(&orig);
+            }
+        }
+        s
+    }
+
     impl EngineSdk {
         pub async fn spawn_tauri_sidecar(
             app: &tauri::AppHandle,
             sidecar: &str,
         ) -> Result<Self, SdkError> {
-            let cmd = app
+            #[allow(unused_mut)]
+            let mut cmd = app
                 .shell()
                 .sidecar(sidecar)
                 .map_err(|e| SdkError::Io(e.to_string()))?;
+
+            // Ensure cudarc dynamic-loading can find bundled CUDA runtime libraries.
+            // We rely on per-process environment injection (sidecar only).
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                use tauri::Manager;
+
+                let resource_dir = app
+                    .path()
+                    .resource_dir()
+                    .map_err(|e| SdkError::Io(e.to_string()))?;
+
+                #[cfg(target_os = "linux")]
+                {
+                    let cuda_dir = resource_dir.join("cuda/linux-x64-cuda12.2");
+                    let ld =
+                        prepend_path_like(std::env::var_os("LD_LIBRARY_PATH"), &cuda_dir, ':');
+                    cmd.env("LD_LIBRARY_PATH", ld);
+                }
+
+                #[cfg(target_os = "windows")]
+                {
+                    let cuda_dir = resource_dir.join("cuda/win-x64-cuda12.4");
+                    let path = prepend_path_like(std::env::var_os("PATH"), &cuda_dir, ';');
+                    cmd.env("PATH", path);
+                }
+            }
+
             // IMPORTANT: our IPC uses binary frames on stdout, so we must enable raw output.
             let (mut rx, child) = cmd
                 .set_raw_out(true)

@@ -1,0 +1,4 @@
+This directory is reserved for bundled CUDA redistributables.
+
+It is intentionally kept in the repository so Tauri bundling glob patterns
+do not fail on non-CUDA builds.

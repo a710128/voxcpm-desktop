@@ -6,7 +6,9 @@ Scope:
 - OS: Windows / macOS / Linux
 - Hardware variants:
   - CPU build (always available)
-  - CUDA build (Windows/Linux only, CUDA 12.2)
+  - CUDA build (Windows/Linux only)
+    - Windows: CUDA 12.4 runtime bundle
+    - Linux: CUDA 12.2 runtime bundle
   - Metal support on macOS (via a Metal-enabled engine build)
 - Update model: manual downloads via GitHub Releases (no in-app auto-updater requirement)
 - Model/weights: not bundled in installers; downloaded on-demand at runtime
@@ -42,20 +44,20 @@ Runtime behavior (current implementation):
 - Target: x86_64
 - GUI: 2 NSIS installers (CPU and CUDA)
   - CPU build: CPU-only engine
-  - CUDA build: CUDA-enabled engine + bundled CUDA runtime dependencies
+  - CUDA build: CUDA-enabled engine + bundled CUDA runtime dependencies (CUDA 12.4)
 
 Runtime behavior (current implementation):
 - The app queries `engine.list_devices()` and picks a default device spec (prefer CUDA, else Metal, else CPU).
-- If the CUDA build cannot initialize CUDA driver APIs at runtime, it simply won't report `cuda:N` devices and the app will run on CPU.
-- CUDA build must still start and run in CPU mode on machines without an NVIDIA GPU/driver.
-- There is no automatic “try CUDA then fallback to CPU on load failure” retry today; failures surface to UI.
+- CUDA build is GPU-only by policy: if NVIDIA driver is missing/too old, or required CUDA runtime libraries are missing, the engine will exit non-zero and the GUI will surface an error.
+- CUDA build is allowed to be installed on non-NVIDIA machines, but it is expected to fail to start.
+- There is no automatic retry/fallback (e.g. try CUDA then CPU) today.
 
 ### Linux
 
 - Target: x86_64
 - GUI: 2 AppImage assets (CPU and CUDA)
   - CPU build: CPU-only engine
-  - CUDA build: CUDA-enabled engine + bundled CUDA runtime dependencies
+  - CUDA build: CUDA-enabled engine + bundled CUDA runtime dependencies (CUDA 12.2)
 
 Runtime behavior (current implementation):
 - Same as Windows.
@@ -71,7 +73,7 @@ Version:
 ### GUI assets
 
 - Windows (CPU): `VoxCPM_Desktop_X.Y.Z_windows-x64_setup_cpu.exe`
-- Windows (CUDA 12.2): `VoxCPM_Desktop_X.Y.Z_windows-x64_setup_cuda12_2.exe`
+- Windows (CUDA 12.4): `VoxCPM_Desktop_X.Y.Z_windows-x64_setup_cuda12_4.exe`
 - macOS: `VoxCPM_Desktop_X.Y.Z_macos-universal.dmg`
 - Linux (CPU): `VoxCPM_Desktop_X.Y.Z_linux-x64_cpu.AppImage`
 - Linux (CUDA 12.2): `VoxCPM_Desktop_X.Y.Z_linux-x64_cuda12_2.AppImage`
@@ -95,11 +97,12 @@ For every downloadable asset (GUI), publish:
 ## CUDA Driver Requirement Policy
 
 Minimum (as a product policy):
-- Windows/Linux CUDA builds require NVIDIA driver >= 525.
+- Windows CUDA 12.4 build requires NVIDIA driver >= 525.
+- Linux CUDA 12.2 build requires NVIDIA driver >= 525.
 
 Clarification:
-- The driver requirement only applies to using `cuda:N` devices.
-- If no NVIDIA driver is installed, the CUDA build should still run in CPU mode (and `list_devices()` should not include `cuda:N`).
+- CUDA builds are GPU-only by policy.
+- If no NVIDIA driver is installed, or the driver is too old, the engine is expected to fail-fast (exit non-zero) during startup/probe.
 
 Recommended (for stability):
 - Newer drivers are strongly recommended, especially if the engine uses PTX or NVRTC at runtime.
@@ -110,7 +113,26 @@ Recommended (for stability):
 - CUDA devices are only reported by the engine when:
   - the engine is built with CUDA support, and
   - CUDA driver initialization succeeds at runtime.
-- If CUDA cannot be initialized, `list_devices()` will not include `cuda:N`, and the app will run on CPU.
+- If CUDA cannot be initialized, the engine is expected to fail-fast (exit non-zero).
+
+## CUDA Runtime Bundling (Windows/Linux)
+
+The CUDA installers/AppImages are self-contained and must include the CUDA runtime/toolkit user-mode libraries needed by the engine.
+
+Important constraints (current architecture):
+- The engine uses `cudarc` dynamic-loading. This means CUDA libraries are loaded at runtime via OS loader search paths (not via static link dependencies).
+- Because libraries may only be loaded when certain code paths execute, we maintain an explicit per-OS runtime library list (the source of truth) and do a startup probe that attempts to load them all.
+
+Policy:
+- Missing/incorrect NVIDIA driver OR missing any required CUDA runtime library is a fatal error for CUDA builds (engine exits non-zero; GUI surfaces an error).
+
+Bundling layout and loader behavior:
+- Windows (CUDA 12.4): ship required `*.dll` next to `engine.exe` (or otherwise ensure the engine process resolves DLLs from the bundled directory first).
+- Linux (CUDA 12.2): ship required `lib*.so*` inside the AppImage and inject `LD_LIBRARY_PATH` when spawning the sidecar so `dlopen()` resolves the bundled libraries.
+
+Release requirements:
+- Maintain a versioned CUDA runtime manifest per OS (file list + version + sha256) and use it to fetch NVIDIA official redistributables during CI builds.
+- The engine startup probe must print a clear error message describing which driver/library check failed.
 
 ## Model/Weights Distribution
 
@@ -135,11 +157,13 @@ Retention:
 Windows:
 - No NVIDIA GPU: install and run CPU; model download works.
 - NVIDIA GPU + driver meets policy: CPU build works; CUDA build lists `cuda:0` and CUDA inference works.
-- CUDA build on non-NVIDIA machine: should still start and run CPU (and not list `cuda:N`).
+- CUDA build on non-NVIDIA machine: engine is expected to fail-fast and GUI should surface an error.
+- CUDA build with missing CUDA runtime DLL: engine is expected to fail-fast and GUI should surface an error.
 
 Linux:
 - No NVIDIA GPU: AppImage runs; CPU inference + model download works.
 - NVIDIA GPU + driver meets policy: CUDA build lists `cuda:0` and CUDA inference works.
+- CUDA build with missing NVIDIA driver OR missing CUDA runtime .so: engine is expected to fail-fast and GUI should surface an error.
 
 macOS:
 - Metal path works on supported macOS.

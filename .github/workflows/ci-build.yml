@@ -252,6 +252,28 @@ jobs:
           DST="$BIN_DIR/engine-${{ matrix.rust_target }}${{ matrix.exe_ext }}"
           cp "$SRC" "$DST"
 
+      - name: Fetch CUDA redist libs (Windows CUDA 12.4)
+        if: ${{ runner.os == 'Windows' && matrix.variant == 'cuda12_4' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python tools/fetch_cuda_redist.py \
+            --cuda-minor 12.4 \
+            --platform windows-x86_64 \
+            --out-dir crates/voxcpm_desktop/src-tauri/resources/cuda/win-x64-cuda12.4 \
+            --components cuda_cudart libcublas libcurand
+
+      - name: Fetch CUDA redist libs (Linux CUDA 12.2)
+        if: ${{ runner.os == 'Linux' && matrix.variant == 'cuda12_2' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 tools/fetch_cuda_redist.py \
+            --cuda-minor 12.2 \
+            --platform linux-x86_64 \
+            --out-dir crates/voxcpm_desktop/src-tauri/resources/cuda/linux-x64-cuda12.2 \
+            --components cuda_cudart libcublas libcurand
+
       - name: Build Tauri bundle (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

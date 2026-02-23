@@ -30,7 +30,7 @@
   "bundle": {
     "active": true,
     "externalBin": ["binaries/engine"],
-    "resources": [],
+    "resources": ["resources/cuda/"],
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
