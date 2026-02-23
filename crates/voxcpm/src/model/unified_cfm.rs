@@ -113,6 +113,18 @@ impl<E: VelocityEstimator> UnifiedCfm<E> {
             return Tensor::from_vec(data, (b, c, t), device)?.to_dtype(dtype);
         }
 
+        // If is metal, use cpu rng to generate random numbers.
+        // This is because Metal backend rng is not working properly.
+        if device.is_metal() {
+            let mut rng = ChaCha20Rng::seed_from_u64(seed);
+            let mut data = Vec::with_capacity(b * c * t);
+            for _ in 0..(b * c * t) {
+                let v: f32 = rng.sample(StandardNormal);
+                data.push(v);
+            }
+            return Tensor::from_vec(data, (b, c, t), device)?.to_dtype(dtype);
+        }
+
         // Non-CPU: rely on Candle backend RNG, but restore prior seed to avoid leaking state.
         let prev_seed = device.get_current_seed().ok();
         device.set_seed(seed)?;
