@@ -116,18 +116,30 @@ pub(crate) fn decode_audio_mono_f32(audio_bytes: &[u8]) -> Result<(Vec<f32>, u32
     Ok((out_mono, sample_rate))
 }
 
-pub(crate) fn encode_wav_f32_mono(sample_rate: u32, pcm_f32: &[f32]) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_wav_pcm16_mono(sample_rate: u32, pcm_f32: &[f32]) -> Result<Vec<u8>, String> {
+    // NOTE: hound writes WAVEFORMATEXTENSIBLE for float32, and its default channel mask for
+    // 1-channel extensible WAV is FRONT_LEFT, which makes some players (e.g. macOS QuickTime)
+    // route audio to only one ear. 16-bit PCM uses the legacy WAV header (no channel mask).
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
     };
+
+    fn f32_to_i16(s: f32) -> i16 {
+        let s = if s.is_finite() { s } else { 0.0 };
+        // Scale to i16. Use 32768 so -1.0 can reach -32768, then clamp.
+        let v = (s.clamp(-1.0, 1.0) * 32768.0).round();
+        v.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    }
+
     let mut cursor = Cursor::new(Vec::<u8>::new());
     {
         let mut w = hound::WavWriter::new(&mut cursor, spec).map_err(|e| e.to_string())?;
         for s in pcm_f32.iter().copied() {
-            w.write_sample(s).map_err(|e| e.to_string())?;
+            w.write_sample::<i16>(f32_to_i16(s))
+                .map_err(|e| e.to_string())?;
         }
         w.finalize().map_err(|e| e.to_string())?;
     }
@@ -171,5 +183,41 @@ mod tests {
         for s in mono {
             assert!(s.abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn encode_wav_pcm16_mono_is_legacy_pcm() {
+        let pcm = vec![0.0f32, 0.5, -0.5, 1.0, -1.0];
+        let bytes = encode_wav_pcm16_mono(44_100, &pcm).unwrap();
+
+        // Parse the fmt chunk and assert it's plain PCM (format tag 1).
+        let fmt = bytes
+            .windows(4)
+            .position(|w| w == b"fmt ")
+            .expect("fmt chunk not found");
+        assert!(fmt + 24 < bytes.len());
+        let format_tag = u16::from_le_bytes([bytes[fmt + 8], bytes[fmt + 9]]);
+        let channels = u16::from_le_bytes([bytes[fmt + 10], bytes[fmt + 11]]);
+        let sample_rate = u32::from_le_bytes([
+            bytes[fmt + 12],
+            bytes[fmt + 13],
+            bytes[fmt + 14],
+            bytes[fmt + 15],
+        ]);
+        let bits_per_sample = u16::from_le_bytes([bytes[fmt + 22], bytes[fmt + 23]]);
+        assert_eq!(format_tag, 1);
+        assert_eq!(channels, 1);
+        assert_eq!(sample_rate, 44_100);
+        assert_eq!(bits_per_sample, 16);
+
+        // Round-trip decode to ensure sample count is correct.
+        let mut r = hound::WavReader::new(Cursor::new(bytes)).unwrap();
+        let spec = r.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, 44_100);
+        assert_eq!(spec.bits_per_sample, 16);
+        assert_eq!(spec.sample_format, hound::SampleFormat::Int);
+        let samples: Vec<i16> = r.samples::<i16>().map(|s| s.unwrap()).collect();
+        assert_eq!(samples.len(), pcm.len());
     }
 }

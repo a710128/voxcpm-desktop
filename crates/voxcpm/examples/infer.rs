@@ -118,12 +118,21 @@ fn main() {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: audio.sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
+        // Use 16-bit PCM to avoid WAVEFORMATEXTENSIBLE + 1ch FL channel mask,
+        // which can make some players (e.g. macOS QuickTime) output to one ear.
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
     };
+
+    fn f32_to_i16(s: f32) -> i16 {
+        let s = if s.is_finite() { s } else { 0.0 };
+        let v = (s.clamp(-1.0, 1.0) * 32768.0).round();
+        v.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    }
+
     let mut w = hound::WavWriter::create(out, spec).expect("create out.wav");
     for s in audio.pcm_f32.iter().copied() {
-        w.write_sample(s).expect("write sample");
+        w.write_sample::<i16>(f32_to_i16(s)).expect("write sample");
     }
     w.finalize().expect("finalize wav");
     println!(

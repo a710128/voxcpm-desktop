@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::audio::{decode_audio_mono_f32, encode_wav_f32_mono};
+use crate::audio::{decode_audio_mono_f32, encode_wav_pcm16_mono};
 use crate::ipc::OutTx;
 use crate::util::prod_usize;
 
@@ -334,7 +334,7 @@ impl ActorState {
                 }
             })?;
 
-            let wav_bytes = encode_wav_f32_mono(audio.sample_rate, &audio.pcm_f32)
+            let wav_bytes = encode_wav_pcm16_mono(audio.sample_rate, &audio.pcm_f32)
                 .map_err(|e| ActorError {
                     code: "infer_failed".to_string(),
                     message: e,
