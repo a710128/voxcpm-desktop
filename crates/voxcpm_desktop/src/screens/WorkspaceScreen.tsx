@@ -5,6 +5,649 @@ import { writeFile } from '@tauri-apps/plugin-fs'
 
 import type { ProgressEventPayload } from '../types'
 
+// Waveform rendering scale.
+const WAVE_BAR_W = 2
+const WAVE_GAP = 2
+const WAVE_STEP = WAVE_BAR_W + WAVE_GAP
+// Roughly 80px/s at 2px bars + 2px gaps.
+const WAVE_BARS_PER_SEC = 20
+const WAVE_MIN_BARS = 24
+const WAVE_MAX_BARS = 20000
+
+function drawWave(args: {
+  canvas: HTMLCanvasElement | null
+  peaks: Float32Array | null
+  frac: number
+  scrollLeft?: number
+}) {
+  const canvas = args.canvas
+  if (!canvas) return
+  const peaks = args.peaks
+
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+
+  const dpr = window.devicePixelRatio || 1
+  const w = Math.max(1, canvas.clientWidth)
+  const h = Math.max(1, canvas.clientHeight)
+  canvas.width = Math.floor(w * dpr)
+  canvas.height = Math.floor(h * dpr)
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, w, h)
+
+  if (!peaks || peaks.length === 0) return
+
+  const frac = Math.max(0, Math.min(1, args.frac))
+
+  const bars = peaks.length
+  const barW = WAVE_BAR_W
+  const step = WAVE_STEP
+  const totalW = bars * barW + (bars - 1) * WAVE_GAP
+  // Center short waveforms; long waveforms scroll from 0.
+  const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
+  const maxScroll = Math.max(0, left + totalW - w)
+  const scrollLeft = Math.max(0, Math.min(maxScroll, args.scrollLeft ?? 0))
+
+  const mid = h / 2
+  const playheadAbs = left + frac * totalW
+  const playheadX = playheadAbs - scrollLeft
+
+  const ampMax = Math.max(1, h - 10)
+  const minBarH = 6
+  function barHeight(v: number) {
+    // Boost perceived height a bit.
+    const x = Math.max(0, Math.min(1, v))
+    const boosted = Math.pow(x, 0.65)
+    return Math.max(minBarH, boosted * ampMax)
+  }
+
+  ctx.lineCap = 'round'
+  ctx.lineWidth = barW
+
+  const viewStartAbs = scrollLeft
+  const viewEndAbs = scrollLeft + w
+  const startIdx = Math.max(0, Math.floor((viewStartAbs - left) / step) - 2)
+  const endIdx = Math.min(bars, Math.ceil((viewEndAbs - left) / step) + 2)
+  const playedIdx = Math.max(-1, Math.min(bars - 1, Math.floor((playheadAbs - left) / step)))
+
+  // Unplayed bars.
+  ctx.strokeStyle = 'rgba(17, 24, 39, 0.38)'
+  ctx.beginPath()
+  for (let i = Math.max(startIdx, playedIdx + 1); i < endIdx; i++) {
+    const x = left + i * step + barW / 2 - scrollLeft
+    const barH = barHeight(peaks[i])
+    ctx.moveTo(x, mid - barH / 2)
+    ctx.lineTo(x, mid + barH / 2)
+  }
+  ctx.stroke()
+
+  // Played bars.
+  ctx.strokeStyle = 'rgba(59, 91, 253, 0.95)'
+  ctx.beginPath()
+  for (let i = startIdx; i < endIdx && i <= playedIdx; i++) {
+    const x = left + i * step + barW / 2 - scrollLeft
+    const barH = barHeight(peaks[i])
+    ctx.moveTo(x, mid - barH / 2)
+    ctx.lineTo(x, mid + barH / 2)
+  }
+  ctx.stroke()
+
+  // Playhead.
+  const px = Math.max(0, Math.min(w, playheadX))
+  ctx.strokeStyle = 'rgba(185, 160, 255, 0.72)'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(px, 6)
+  ctx.lineTo(px, h - 6)
+  ctx.stroke()
+}
+
+function formatTime(sec: number | null) {
+  if (sec == null || !Number.isFinite(sec) || sec < 0) return '--:--'
+  const s = Math.floor(sec)
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}:${String(r).padStart(2, '0')}`
+}
+
+function WaveformPlayer(p: {
+  label: string
+  src: string | null
+  peaks: Float32Array | null
+  canvasRef: { current: HTMLCanvasElement | null }
+  isDecoding: boolean
+  waveRedrawTick: number
+  overlayLabel?: string | null
+  onSave?: () => void
+  isSaving?: boolean
+  onClear?: () => void
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const rafRef = useRef<number | null>(null)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const scrollRafRef = useRef<number | null>(null)
+  const [isPlaying, setIsPlaying] = useState<boolean>(false)
+  const [duration, setDuration] = useState<number | null>(null)
+  const [currentTime, setCurrentTime] = useState<number>(0)
+  const [volume, setVolume] = useState<number>(1)
+  const [isMuted, setIsMuted] = useState<boolean>(false)
+  const [showVolume, setShowVolume] = useState<boolean>(false)
+
+  const SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const
+  const [speedIdx, setSpeedIdx] = useState<number>(1)
+  const speed = SPEEDS[speedIdx]
+
+  const frac = useMemo(() => {
+    if (duration == null || !Number.isFinite(duration) || duration <= 0) return 0
+    return Math.max(0, Math.min(1, currentTime / duration))
+  }, [currentTime, duration])
+
+  // Keep the audio element volume in sync.
+  useEffect(() => {
+    const a = audioRef.current
+    if (!a) return
+    a.volume = Math.max(0, Math.min(1, volume))
+  }, [volume])
+
+  useEffect(() => {
+    const a = audioRef.current
+    if (!a) return
+    a.muted = isMuted
+  }, [isMuted])
+
+  useEffect(() => {
+    const a = audioRef.current
+    if (!a) return
+    a.playbackRate = speed
+  }, [speed])
+
+  useEffect(() => {
+    if (!showVolume) return
+    function onDown(e: PointerEvent) {
+      const target = e.target as HTMLElement | null
+      if (!target) return
+      if (target.closest('.wfVolumeWrap')) return
+      setShowVolume(false)
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => window.removeEventListener('pointerdown', onDown, true)
+  }, [showVolume])
+
+  useEffect(() => {
+    const aEl = audioRef.current
+    if (!aEl) return
+
+    const a: HTMLAudioElement = aEl
+
+    function stopRaf() {
+      if (rafRef.current != null) {
+        window.cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
+
+    function fracFromEl() {
+      const d = a!.duration
+      const t = a!.currentTime
+      if (!Number.isFinite(d) || d <= 0) return 0
+      return Math.max(0, Math.min(1, t / d))
+    }
+
+    function redrawFromEl() {
+      drawWave({
+        canvas: p.canvasRef.current,
+        peaks: p.peaks,
+        frac: fracFromEl(),
+        scrollLeft: scrollRef.current?.scrollLeft ?? 0,
+      })
+    }
+
+    function ensurePlayheadVisible(nextFrac: number) {
+      const sc = scrollRef.current
+      const canvas = p.canvasRef.current
+      if (!sc || !canvas || !p.peaks || p.peaks.length === 0) return
+      const w = Math.max(1, canvas.clientWidth)
+      const bars = p.peaks.length
+      const totalW = bars * WAVE_BAR_W + (bars - 1) * WAVE_GAP
+      const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
+      const maxScroll = Math.max(0, left + totalW - w)
+      if (maxScroll <= 0) return
+
+      const playheadAbs = left + Math.max(0, Math.min(1, nextFrac)) * totalW
+      const cur = sc.scrollLeft
+      const safeLeft = w * 0.25
+      const safeRight = w * 0.35
+      const visStart = cur
+      const visEnd = cur + w
+      let next = cur
+      if (playheadAbs < visStart + safeLeft) {
+        next = playheadAbs - safeLeft
+      } else if (playheadAbs > visEnd - safeRight) {
+        next = playheadAbs - (w - safeRight)
+      } else {
+        return
+      }
+      sc.scrollLeft = Math.max(0, Math.min(maxScroll, next))
+    }
+
+    function updateOnce() {
+      const d = a!.duration
+      setDuration(Number.isFinite(d) && d > 0 ? d : null)
+      setCurrentTime(a!.currentTime || 0)
+      setIsPlaying(!a!.paused && !a!.ended)
+      redrawFromEl()
+    }
+
+    function tick() {
+      // Redraw smoothly during playback without forcing React re-renders.
+      const f = fracFromEl()
+      ensurePlayheadVisible(f)
+      drawWave({
+        canvas: p.canvasRef.current,
+        peaks: p.peaks,
+        frac: f,
+        scrollLeft: scrollRef.current?.scrollLeft ?? 0,
+      })
+      if (!a!.paused && !a!.ended) {
+        rafRef.current = window.requestAnimationFrame(tick)
+      } else {
+        stopRaf()
+      }
+    }
+
+    function onPlay() {
+      stopRaf()
+      rafRef.current = window.requestAnimationFrame(tick)
+      setIsPlaying(true)
+    }
+
+    function onPause() {
+      stopRaf()
+      updateOnce()
+    }
+
+    function onEnded() {
+      stopRaf()
+      updateOnce()
+    }
+
+    a!.addEventListener('loadedmetadata', updateOnce)
+    a!.addEventListener('timeupdate', updateOnce)
+    a!.addEventListener('seeked', updateOnce)
+    a!.addEventListener('play', onPlay)
+    a!.addEventListener('pause', onPause)
+    a!.addEventListener('ended', onEnded)
+    updateOnce()
+
+    return () => {
+      stopRaf()
+      a!.removeEventListener('loadedmetadata', updateOnce)
+      a!.removeEventListener('timeupdate', updateOnce)
+      a!.removeEventListener('seeked', updateOnce)
+      a!.removeEventListener('play', onPlay)
+      a!.removeEventListener('pause', onPause)
+      a!.removeEventListener('ended', onEnded)
+    }
+  }, [p.canvasRef, p.peaks, p.src])
+
+  useEffect(() => {
+    // Redraw on resize as well.
+    drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac, scrollLeft: scrollRef.current?.scrollLeft ?? 0 })
+  }, [p.waveRedrawTick, p.canvasRef, p.peaks, frac])
+
+  useEffect(() => {
+    // When loading a new waveform, start at the beginning.
+    if (scrollRef.current) scrollRef.current.scrollLeft = 0
+    drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac, scrollLeft: 0 })
+  }, [p.peaks])
+
+  function togglePlay() {
+    const a = audioRef.current
+    if (!a || !p.src) return
+    if (a.paused || a.ended) {
+      void a.play().catch(() => {})
+    } else {
+      a.pause()
+    }
+  }
+
+  function skipBySeconds(delta: number) {
+    const a = audioRef.current
+    if (!a) return
+    const d = a.duration
+    const maxT = Number.isFinite(d) && d > 0 ? d : Number.POSITIVE_INFINITY
+    a.currentTime = Math.max(0, Math.min(maxT, (a.currentTime || 0) + delta))
+    setCurrentTime(a.currentTime || 0)
+    const f = Number.isFinite(d) && d > 0 ? a.currentTime / d : 0
+    if (Number.isFinite(d) && d > 0) {
+      // Keep the playhead in view after jumps.
+      const sc = scrollRef.current
+      const canvas = p.canvasRef.current
+      if (sc && canvas && p.peaks && p.peaks.length > 0) {
+        const w = Math.max(1, canvas.clientWidth)
+        const bars = p.peaks.length
+        const totalW = bars * WAVE_BAR_W + (bars - 1) * WAVE_GAP
+        const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
+        const maxScroll = Math.max(0, left + totalW - w)
+        const playheadAbs = left + Math.max(0, Math.min(1, f)) * totalW
+        const cur = sc.scrollLeft
+        const safeLeft = w * 0.25
+        const safeRight = w * 0.35
+        const visStart = cur
+        const visEnd = cur + w
+        let next = cur
+        if (playheadAbs < visStart + safeLeft) next = playheadAbs - safeLeft
+        else if (playheadAbs > visEnd - safeRight) next = playheadAbs - (w - safeRight)
+        sc.scrollLeft = Math.max(0, Math.min(maxScroll, next))
+      }
+    }
+    drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac: f, scrollLeft: scrollRef.current?.scrollLeft ?? 0 })
+  }
+
+  function toggleMute() {
+    setIsMuted((v) => !v)
+    setShowVolume(false)
+  }
+
+  function cycleSpeed() {
+    setSpeedIdx((i) => (i + 1) % SPEEDS.length)
+  }
+
+  function seekToFrac(nextFrac: number) {
+    const a = audioRef.current
+    if (!a) return
+    const d = a.duration
+    if (!Number.isFinite(d) || d <= 0) return
+    const f = Math.max(0, Math.min(1, nextFrac))
+    a.currentTime = f * d
+    setCurrentTime(a.currentTime)
+    // Ensure the playhead stays visible after seeks.
+    const sc = scrollRef.current
+    const canvas = p.canvasRef.current
+    if (sc && canvas && p.peaks && p.peaks.length > 0) {
+      const w = Math.max(1, canvas.clientWidth)
+      const bars = p.peaks.length
+      const totalW = bars * WAVE_BAR_W + (bars - 1) * WAVE_GAP
+      const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
+      const maxScroll = Math.max(0, left + totalW - w)
+      const playheadAbs = left + f * totalW
+      const cur = sc.scrollLeft
+      const safeLeft = w * 0.25
+      const safeRight = w * 0.35
+      const visStart = cur
+      const visEnd = cur + w
+      let next = cur
+      if (playheadAbs < visStart + safeLeft) next = playheadAbs - safeLeft
+      else if (playheadAbs > visEnd - safeRight) next = playheadAbs - (w - safeRight)
+      sc.scrollLeft = Math.max(0, Math.min(maxScroll, next))
+    }
+    drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac: f, scrollLeft: scrollRef.current?.scrollLeft ?? 0 })
+  }
+
+  function fracFromClientX(clientX: number) {
+    const canvas = p.canvasRef.current
+    if (!canvas || !p.peaks || p.peaks.length === 0) return null
+    const rect = canvas.getBoundingClientRect()
+    const x = clientX - rect.left
+    const w = Math.max(1, rect.width)
+    const bars = p.peaks.length
+    const totalW = bars * WAVE_BAR_W + (bars - 1) * WAVE_GAP
+    const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
+    const scrollLeft = scrollRef.current?.scrollLeft ?? 0
+    const absX = scrollLeft + x
+    const rel = (absX - left) / Math.max(1, totalW)
+    return Math.max(0, Math.min(1, rel))
+  }
+
+  function onWaveScroll() {
+    // Redraw the visible segment while scrolling.
+    if (scrollRafRef.current != null) return
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac, scrollLeft: scrollRef.current?.scrollLeft ?? 0 })
+    })
+  }
+
+  function onPointerDown(e: React.PointerEvent) {
+    if (!p.src) return
+    const f = fracFromClientX(e.clientX)
+    if (f == null) return
+    ;(e.currentTarget as any).setPointerCapture?.(e.pointerId)
+    seekToFrac(f)
+  }
+
+  function onPointerMove(e: React.PointerEvent) {
+    if (!p.src) return
+    if ((e.buttons & 1) === 0) return
+    const f = fracFromClientX(e.clientX)
+    if (f == null) return
+    seekToFrac(f)
+  }
+
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (!p.src) return
+    const a = audioRef.current
+    if (!a) return
+    const d = a.duration
+    if (!Number.isFinite(d) || d <= 0) return
+    const step = 2 // seconds
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault()
+      a.currentTime = Math.max(0, a.currentTime - step)
+      setCurrentTime(a.currentTime)
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault()
+      a.currentTime = Math.min(d, a.currentTime + step)
+      setCurrentTime(a.currentTime)
+    }
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault()
+      togglePlay()
+    }
+  }
+
+  function Icon(p2: { name: 'play' | 'pause' | 'skipBack' | 'skipFwd' | 'volume' | 'muted' | 'reset' | 'download' }) {
+    const common = { className: 'wfIcon', viewBox: '0 0 24 24', 'aria-hidden': true as const }
+    switch (p2.name) {
+      case 'play':
+        return (
+          <svg {...common}>
+            <path fill="currentColor" stroke="none" d="M8 5v14l11-7z" />
+          </svg>
+        )
+      case 'pause':
+        return (
+          <svg {...common}>
+            <path fill="currentColor" stroke="none" d="M6 5h4v14H6zM14 5h4v14h-4z" />
+          </svg>
+        )
+      case 'skipBack':
+        return (
+          <svg {...common}>
+            <path fill="currentColor" stroke="none" d="M6 6h2v12H6z" />
+            <path fill="currentColor" stroke="none" d="M18 6L8 12l10 6z" />
+          </svg>
+        )
+      case 'skipFwd':
+        return (
+          <svg {...common}>
+            <path fill="currentColor" stroke="none" d="M16 6h2v12h-2z" />
+            <path fill="currentColor" stroke="none" d="M6 6l10 6-10 6z" />
+          </svg>
+        )
+      case 'volume':
+        return (
+          <svg {...common}>
+            <path d="M11 5L7 9H4v6h3l4 4z" />
+            <path d="M15 9a4 4 0 0 1 0 6" />
+          </svg>
+        )
+      case 'muted':
+        return (
+          <svg {...common}>
+            <path d="M11 5L7 9H4v6h3l4 4z" />
+            <path d="M16 9l4 6" />
+            <path d="M20 9l-4 6" />
+          </svg>
+        )
+      case 'reset':
+        return (
+          <svg {...common}>
+            <path d="M21 2v6h-6" />
+            <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+            <path d="M3 22v-6h6" />
+            <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+          </svg>
+        )
+      case 'download':
+        return (
+          <svg {...common}>
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <path d="M7 10l5 5 5-5" />
+            <path d="M12 15V3" />
+          </svg>
+        )
+    }
+  }
+
+  const speedLabel = speed === 1 ? '1x' : `${speed}x`
+
+  const waveContentW = useMemo(() => {
+    if (!p.peaks || p.peaks.length === 0) return 0
+    return Math.max(1, p.peaks.length * WAVE_STEP - WAVE_GAP)
+  }, [p.peaks])
+
+  return (
+    <div className="wfPlayer">
+      <div
+        className="waveform wfWave"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        tabIndex={0}
+        onKeyDown={onKeyDown}
+        aria-label={`${p.label} waveform`}
+      >
+        <div
+          className="waveformScroll"
+          ref={scrollRef}
+          onScroll={onWaveScroll}
+          style={{ ['--wave-content-w' as any]: waveContentW ? `${waveContentW}px` : '100%' }}
+        >
+          <canvas ref={p.canvasRef as any} className="waveformCanvas waveformCanvasSticky" />
+        </div>
+        {(() => {
+          const overlay = p.overlayLabel ?? (p.isDecoding ? 'Rendering waveform' : p.src ? null : 'No audio')
+          if (!overlay) return null
+
+          return (
+            <div className="waveformOverlay muted small">
+              {overlay.startsWith('Generating') ? (
+                <span className="wfOverlayRow">
+                  <span className="wfSpinner" aria-hidden={true} />
+                  <span>{overlay}</span>
+                </span>
+              ) : (
+                <span>{overlay}</span>
+              )}
+            </div>
+          )
+        })()}
+      </div>
+
+      <div className="wfTimes" aria-label="Time">
+        <span>{formatTime(currentTime)}</span>
+        <span>{formatTime(duration)}</span>
+      </div>
+
+      <div className="wfControls">
+        <div className="wfLeft">
+          <div className="wfVolumeWrap">
+            <button
+              type="button"
+              className="wfBtn"
+              onClick={() => setShowVolume((v) => !v)}
+              aria-label="Volume"
+              aria-expanded={showVolume}
+              title="Volume"
+            >
+              <Icon name={isMuted ? 'muted' : 'volume'} />
+            </button>
+            {showVolume ? (
+              <div className="wfVolumePopover" role="group" aria-label="Volume slider">
+                <button type="button" className="wfVolMute" onClick={toggleMute} aria-label={isMuted ? 'Unmute' : 'Mute'}>
+                  <Icon name={isMuted ? 'muted' : 'volume'} />
+                </button>
+                <input
+                  className="wfVolRange"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={isMuted ? 0 : volume}
+                  onChange={(e) => {
+                    const v = Number(e.target.value)
+                    setVolume(v)
+                    if (v > 0) setIsMuted(false)
+                  }}
+                  disabled={!p.src}
+                  aria-label="Volume"
+                />
+              </div>
+            ) : null}
+          </div>
+
+          <button type="button" className="wfPill" onClick={cycleSpeed} disabled={!p.src} aria-label="Speed" title="Speed">
+            {speedLabel}
+          </button>
+        </div>
+
+        <div className="wfCenter">
+          <button type="button" className="wfBtn" onClick={() => skipBySeconds(-2)} disabled={!p.src} aria-label="Back 2 seconds" title="Back 2s">
+            <Icon name="skipBack" />
+          </button>
+          <button
+            type="button"
+            className="wfBtn wfBtnPrimary"
+            onClick={togglePlay}
+            disabled={!p.src}
+            aria-label={isPlaying ? 'Pause' : 'Play'}
+            aria-pressed={isPlaying}
+            title={isPlaying ? 'Pause' : 'Play'}
+          >
+            <Icon name={isPlaying ? 'pause' : 'play'} />
+          </button>
+          <button type="button" className="wfBtn" onClick={() => skipBySeconds(2)} disabled={!p.src} aria-label="Forward 2 seconds" title="Forward 2s">
+            <Icon name="skipFwd" />
+          </button>
+        </div>
+
+        <div className="wfRight">
+          {p.onSave ? (
+            <button
+              type="button"
+              className="wfBtn"
+              onClick={p.onSave}
+              disabled={!p.src || p.isSaving}
+              aria-label={p.isSaving ? 'Saving output audio' : 'Save output audio'}
+              title={p.isSaving ? 'Saving…' : 'Save'}
+            >
+              {p.isSaving ? <span className="wfSpinner" aria-hidden={true} /> : <Icon name="download" />}
+            </button>
+          ) : null}
+          {p.onClear ? (
+            <button type="button" className="wfBtn" onClick={p.onClear} aria-label="Clear" title="Clear">
+              <Icon name="reset" />
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <audio ref={audioRef} className="audioEl" src={p.src ?? undefined} preload="metadata" />
+    </div>
+  )
+}
+
 export function WorkspaceScreen(props: {
   deviceSpec: string
   referenceAudioName: string | null
@@ -66,103 +709,6 @@ export function WorkspaceScreen(props: {
     }, [value, maxRows])
 
     return ref
-  }
-
-  // Waveform rendering scale.
-  const WAVE_BAR_W = 2
-  const WAVE_GAP = 2
-  const WAVE_STEP = WAVE_BAR_W + WAVE_GAP
-  // Roughly 80px/s at 2px bars + 2px gaps.
-  const WAVE_BARS_PER_SEC = 20
-  const WAVE_MIN_BARS = 24
-  const WAVE_MAX_BARS = 20000
-
-  function drawWave(args: {
-    canvas: HTMLCanvasElement | null
-    peaks: Float32Array | null
-    frac: number
-    scrollLeft?: number
-  }) {
-    const canvas = args.canvas
-    if (!canvas) return
-    const peaks = args.peaks
-
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const dpr = window.devicePixelRatio || 1
-    const w = Math.max(1, canvas.clientWidth)
-    const h = Math.max(1, canvas.clientHeight)
-    canvas.width = Math.floor(w * dpr)
-    canvas.height = Math.floor(h * dpr)
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, w, h)
-
-    if (!peaks || peaks.length === 0) return
-
-    const frac = Math.max(0, Math.min(1, args.frac))
-
-    const bars = peaks.length
-    const barW = WAVE_BAR_W
-    const step = WAVE_STEP
-    const totalW = bars * barW + (bars - 1) * WAVE_GAP
-    // Center short waveforms; long waveforms scroll from 0.
-    const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
-    const maxScroll = Math.max(0, left + totalW - w)
-    const scrollLeft = Math.max(0, Math.min(maxScroll, args.scrollLeft ?? 0))
-
-    const mid = h / 2
-    const playheadAbs = left + frac * totalW
-    const playheadX = playheadAbs - scrollLeft
-
-    const ampMax = Math.max(1, h - 10)
-    const minBarH = 6
-    function barHeight(v: number) {
-      // Boost perceived height a bit.
-      const x = Math.max(0, Math.min(1, v))
-      const boosted = Math.pow(x, 0.65)
-      return Math.max(minBarH, boosted * ampMax)
-    }
-
-    ctx.lineCap = 'round'
-    ctx.lineWidth = barW
-
-    const viewStartAbs = scrollLeft
-    const viewEndAbs = scrollLeft + w
-    const startIdx = Math.max(0, Math.floor((viewStartAbs - left) / step) - 2)
-    const endIdx = Math.min(bars, Math.ceil((viewEndAbs - left) / step) + 2)
-    const playedIdx = Math.max(-1, Math.min(bars - 1, Math.floor((playheadAbs - left) / step)))
-
-    // Unplayed bars.
-    ctx.strokeStyle = 'rgba(17, 24, 39, 0.38)'
-    ctx.beginPath()
-    for (let i = Math.max(startIdx, playedIdx + 1); i < endIdx; i++) {
-      const x = left + i * step + barW / 2 - scrollLeft
-      const barH = barHeight(peaks[i])
-      ctx.moveTo(x, mid - barH / 2)
-      ctx.lineTo(x, mid + barH / 2)
-    }
-    ctx.stroke()
-
-    // Played bars.
-    ctx.strokeStyle = 'rgba(59, 91, 253, 0.95)'
-    ctx.beginPath()
-    for (let i = startIdx; i < endIdx && i <= playedIdx; i++) {
-      const x = left + i * step + barW / 2 - scrollLeft
-      const barH = barHeight(peaks[i])
-      ctx.moveTo(x, mid - barH / 2)
-      ctx.lineTo(x, mid + barH / 2)
-    }
-    ctx.stroke()
-
-    // Playhead.
-    const px = Math.max(0, Math.min(w, playheadX))
-    ctx.strokeStyle = 'rgba(185, 160, 255, 0.72)'
-    ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.moveTo(px, 6)
-    ctx.lineTo(px, h - 6)
-    ctx.stroke()
   }
 
   function isWavFile(f: File) {
@@ -363,14 +909,6 @@ export function WorkspaceScreen(props: {
     }
   }, [props.audioUrl])
 
-  function formatTime(sec: number | null) {
-    if (sec == null || !Number.isFinite(sec) || sec < 0) return '--:--'
-    const s = Math.floor(sec)
-    const m = Math.floor(s / 60)
-    const r = s % 60
-    return `${m}:${String(r).padStart(2, '0')}`
-  }
-
   function makeDefaultOutFileName() {
     const d = new Date()
     const pad2 = (n: number) => String(n).padStart(2, '0')
@@ -399,543 +937,6 @@ export function WorkspaceScreen(props: {
     } finally {
       setIsSavingOut(false)
     }
-  }
-
-  function WaveformPlayer(p: {
-    label: string
-    src: string | null
-    peaks: Float32Array | null
-    canvasRef: { current: HTMLCanvasElement | null }
-    isDecoding: boolean
-    overlayLabel?: string | null
-    onSave?: () => void
-    isSaving?: boolean
-    onClear?: () => void
-  }) {
-    const audioRef = useRef<HTMLAudioElement | null>(null)
-    const rafRef = useRef<number | null>(null)
-    const scrollRef = useRef<HTMLDivElement | null>(null)
-    const scrollRafRef = useRef<number | null>(null)
-    const [isPlaying, setIsPlaying] = useState<boolean>(false)
-    const [duration, setDuration] = useState<number | null>(null)
-    const [currentTime, setCurrentTime] = useState<number>(0)
-    const [volume, setVolume] = useState<number>(1)
-    const [isMuted, setIsMuted] = useState<boolean>(false)
-    const [showVolume, setShowVolume] = useState<boolean>(false)
-
-    const SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const
-    const [speedIdx, setSpeedIdx] = useState<number>(1)
-    const speed = SPEEDS[speedIdx]
-
-    const frac = useMemo(() => {
-      if (duration == null || !Number.isFinite(duration) || duration <= 0) return 0
-      return Math.max(0, Math.min(1, currentTime / duration))
-    }, [currentTime, duration])
-
-    // Keep the audio element volume in sync.
-    useEffect(() => {
-      const a = audioRef.current
-      if (!a) return
-      a.volume = Math.max(0, Math.min(1, volume))
-    }, [volume])
-
-    useEffect(() => {
-      const a = audioRef.current
-      if (!a) return
-      a.muted = isMuted
-    }, [isMuted])
-
-    useEffect(() => {
-      const a = audioRef.current
-      if (!a) return
-      a.playbackRate = speed
-    }, [speed])
-
-    useEffect(() => {
-      if (!showVolume) return
-      function onDown(e: PointerEvent) {
-        const target = e.target as HTMLElement | null
-        if (!target) return
-        if (target.closest('.wfVolumeWrap')) return
-        setShowVolume(false)
-      }
-      window.addEventListener('pointerdown', onDown, true)
-      return () => window.removeEventListener('pointerdown', onDown, true)
-    }, [showVolume])
-
-    useEffect(() => {
-      const a = audioRef.current
-      if (!a) return
-
-      function stopRaf() {
-        if (rafRef.current != null) {
-          window.cancelAnimationFrame(rafRef.current)
-          rafRef.current = null
-        }
-      }
-
-      function fracFromEl() {
-        const d = a.duration
-        const t = a.currentTime
-        if (!Number.isFinite(d) || d <= 0) return 0
-        return Math.max(0, Math.min(1, t / d))
-      }
-
-      function redrawFromEl() {
-        drawWave({
-          canvas: p.canvasRef.current,
-          peaks: p.peaks,
-          frac: fracFromEl(),
-          scrollLeft: scrollRef.current?.scrollLeft ?? 0,
-        })
-      }
-
-      function ensurePlayheadVisible(nextFrac: number) {
-        const sc = scrollRef.current
-        const canvas = p.canvasRef.current
-        if (!sc || !canvas || !p.peaks || p.peaks.length === 0) return
-        const w = Math.max(1, canvas.clientWidth)
-        const bars = p.peaks.length
-        const totalW = bars * WAVE_BAR_W + (bars - 1) * WAVE_GAP
-        const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
-        const maxScroll = Math.max(0, left + totalW - w)
-        if (maxScroll <= 0) return
-
-        const playheadAbs = left + Math.max(0, Math.min(1, nextFrac)) * totalW
-        const cur = sc.scrollLeft
-        const safeLeft = w * 0.25
-        const safeRight = w * 0.35
-        const visStart = cur
-        const visEnd = cur + w
-        let next = cur
-        if (playheadAbs < visStart + safeLeft) {
-          next = playheadAbs - safeLeft
-        } else if (playheadAbs > visEnd - safeRight) {
-          next = playheadAbs - (w - safeRight)
-        } else {
-          return
-        }
-        sc.scrollLeft = Math.max(0, Math.min(maxScroll, next))
-      }
-
-      function updateOnce() {
-        const d = a.duration
-        setDuration(Number.isFinite(d) && d > 0 ? d : null)
-        setCurrentTime(a.currentTime || 0)
-        setIsPlaying(!a.paused && !a.ended)
-        redrawFromEl()
-      }
-
-      function tick() {
-        // Redraw smoothly during playback without forcing React re-renders.
-        const f = fracFromEl()
-        ensurePlayheadVisible(f)
-        drawWave({
-          canvas: p.canvasRef.current,
-          peaks: p.peaks,
-          frac: f,
-          scrollLeft: scrollRef.current?.scrollLeft ?? 0,
-        })
-        if (!a.paused && !a.ended) {
-          rafRef.current = window.requestAnimationFrame(tick)
-        } else {
-          stopRaf()
-        }
-      }
-
-      function onPlay() {
-        stopRaf()
-        rafRef.current = window.requestAnimationFrame(tick)
-        setIsPlaying(true)
-      }
-
-      function onPause() {
-        stopRaf()
-        updateOnce()
-      }
-
-      function onEnded() {
-        stopRaf()
-        updateOnce()
-      }
-
-      a.addEventListener('loadedmetadata', updateOnce)
-      a.addEventListener('timeupdate', updateOnce)
-      a.addEventListener('seeked', updateOnce)
-      a.addEventListener('play', onPlay)
-      a.addEventListener('pause', onPause)
-      a.addEventListener('ended', onEnded)
-      updateOnce()
-
-      return () => {
-        stopRaf()
-        a.removeEventListener('loadedmetadata', updateOnce)
-        a.removeEventListener('timeupdate', updateOnce)
-        a.removeEventListener('seeked', updateOnce)
-        a.removeEventListener('play', onPlay)
-        a.removeEventListener('pause', onPause)
-        a.removeEventListener('ended', onEnded)
-      }
-    }, [p.canvasRef, p.peaks, p.src])
-
-    useEffect(() => {
-      // Redraw on resize as well.
-      drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac, scrollLeft: scrollRef.current?.scrollLeft ?? 0 })
-    }, [waveRedrawTick, p.canvasRef, p.peaks, frac])
-
-    useEffect(() => {
-      // When loading a new waveform, start at the beginning.
-      if (scrollRef.current) scrollRef.current.scrollLeft = 0
-      drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac, scrollLeft: 0 })
-    }, [p.peaks])
-
-    function togglePlay() {
-      const a = audioRef.current
-      if (!a || !p.src) return
-      if (a.paused || a.ended) {
-        void a.play().catch(() => {})
-      } else {
-        a.pause()
-      }
-    }
-
-    function skipBySeconds(delta: number) {
-      const a = audioRef.current
-      if (!a) return
-      const d = a.duration
-      const maxT = Number.isFinite(d) && d > 0 ? d : Number.POSITIVE_INFINITY
-      a.currentTime = Math.max(0, Math.min(maxT, (a.currentTime || 0) + delta))
-      setCurrentTime(a.currentTime || 0)
-      const f = Number.isFinite(d) && d > 0 ? a.currentTime / d : 0
-      if (Number.isFinite(d) && d > 0) {
-        // Keep the playhead in view after jumps.
-        const sc = scrollRef.current
-        const canvas = p.canvasRef.current
-        if (sc && canvas && p.peaks && p.peaks.length > 0) {
-          const w = Math.max(1, canvas.clientWidth)
-          const bars = p.peaks.length
-          const totalW = bars * WAVE_BAR_W + (bars - 1) * WAVE_GAP
-          const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
-          const maxScroll = Math.max(0, left + totalW - w)
-          const playheadAbs = left + Math.max(0, Math.min(1, f)) * totalW
-          const cur = sc.scrollLeft
-          const safeLeft = w * 0.25
-          const safeRight = w * 0.35
-          const visStart = cur
-          const visEnd = cur + w
-          let next = cur
-          if (playheadAbs < visStart + safeLeft) next = playheadAbs - safeLeft
-          else if (playheadAbs > visEnd - safeRight) next = playheadAbs - (w - safeRight)
-          sc.scrollLeft = Math.max(0, Math.min(maxScroll, next))
-        }
-      }
-      drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac: f, scrollLeft: scrollRef.current?.scrollLeft ?? 0 })
-    }
-
-    function toggleMute() {
-      setIsMuted((v) => !v)
-      setShowVolume(false)
-    }
-
-    function cycleSpeed() {
-      setSpeedIdx((i) => (i + 1) % SPEEDS.length)
-    }
-
-    function seekToFrac(nextFrac: number) {
-      const a = audioRef.current
-      if (!a) return
-      const d = a.duration
-      if (!Number.isFinite(d) || d <= 0) return
-      const f = Math.max(0, Math.min(1, nextFrac))
-      a.currentTime = f * d
-      setCurrentTime(a.currentTime)
-      // Ensure the playhead stays visible after seeks.
-      const sc = scrollRef.current
-      const canvas = p.canvasRef.current
-      if (sc && canvas && p.peaks && p.peaks.length > 0) {
-        const w = Math.max(1, canvas.clientWidth)
-        const bars = p.peaks.length
-        const totalW = bars * WAVE_BAR_W + (bars - 1) * WAVE_GAP
-        const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
-        const maxScroll = Math.max(0, left + totalW - w)
-        const playheadAbs = left + f * totalW
-        const cur = sc.scrollLeft
-        const safeLeft = w * 0.25
-        const safeRight = w * 0.35
-        const visStart = cur
-        const visEnd = cur + w
-        let next = cur
-        if (playheadAbs < visStart + safeLeft) next = playheadAbs - safeLeft
-        else if (playheadAbs > visEnd - safeRight) next = playheadAbs - (w - safeRight)
-        sc.scrollLeft = Math.max(0, Math.min(maxScroll, next))
-      }
-      drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac: f, scrollLeft: scrollRef.current?.scrollLeft ?? 0 })
-    }
-
-    function fracFromClientX(clientX: number) {
-      const canvas = p.canvasRef.current
-      if (!canvas || !p.peaks || p.peaks.length === 0) return null
-      const rect = canvas.getBoundingClientRect()
-      const x = clientX - rect.left
-      const w = Math.max(1, rect.width)
-      const bars = p.peaks.length
-      const totalW = bars * WAVE_BAR_W + (bars - 1) * WAVE_GAP
-      const left = totalW < w ? Math.max(0, Math.floor((w - totalW) / 2)) : 0
-      const scrollLeft = scrollRef.current?.scrollLeft ?? 0
-      const absX = scrollLeft + x
-      const rel = (absX - left) / Math.max(1, totalW)
-      return Math.max(0, Math.min(1, rel))
-    }
-
-    function onWaveScroll() {
-      // Redraw the visible segment while scrolling.
-      if (scrollRafRef.current != null) return
-      scrollRafRef.current = window.requestAnimationFrame(() => {
-        scrollRafRef.current = null
-        drawWave({ canvas: p.canvasRef.current, peaks: p.peaks, frac, scrollLeft: scrollRef.current?.scrollLeft ?? 0 })
-      })
-    }
-
-    function onPointerDown(e: React.PointerEvent) {
-      if (!p.src) return
-      const f = fracFromClientX(e.clientX)
-      if (f == null) return
-      ;(e.currentTarget as any).setPointerCapture?.(e.pointerId)
-      seekToFrac(f)
-    }
-
-    function onPointerMove(e: React.PointerEvent) {
-      if (!p.src) return
-      if ((e.buttons & 1) === 0) return
-      const f = fracFromClientX(e.clientX)
-      if (f == null) return
-      seekToFrac(f)
-    }
-
-    function onKeyDown(e: React.KeyboardEvent) {
-      if (!p.src) return
-      const a = audioRef.current
-      if (!a) return
-      const d = a.duration
-      if (!Number.isFinite(d) || d <= 0) return
-      const step = 2 // seconds
-      if (e.key === 'ArrowLeft') {
-        e.preventDefault()
-        a.currentTime = Math.max(0, a.currentTime - step)
-        setCurrentTime(a.currentTime)
-      }
-      if (e.key === 'ArrowRight') {
-        e.preventDefault()
-        a.currentTime = Math.min(d, a.currentTime + step)
-        setCurrentTime(a.currentTime)
-      }
-      if (e.key === ' ' || e.key === 'Enter') {
-        e.preventDefault()
-        togglePlay()
-      }
-    }
-
-    function Icon(p2: {
-      name: 'play' | 'pause' | 'skipBack' | 'skipFwd' | 'volume' | 'muted' | 'reset' | 'download'
-    }) {
-      const common = { className: 'wfIcon', viewBox: '0 0 24 24', 'aria-hidden': true as const }
-      switch (p2.name) {
-        case 'play':
-          return (
-            <svg {...common}>
-              <path fill="currentColor" stroke="none" d="M8 5v14l11-7z" />
-            </svg>
-          )
-        case 'pause':
-          return (
-            <svg {...common}>
-              <path fill="currentColor" stroke="none" d="M6 5h4v14H6zM14 5h4v14h-4z" />
-            </svg>
-          )
-        case 'skipBack':
-          return (
-            <svg {...common}>
-              <path fill="currentColor" stroke="none" d="M6 6h2v12H6z" />
-              <path fill="currentColor" stroke="none" d="M18 6L8 12l10 6z" />
-            </svg>
-          )
-        case 'skipFwd':
-          return (
-            <svg {...common}>
-              <path fill="currentColor" stroke="none" d="M16 6h2v12h-2z" />
-              <path fill="currentColor" stroke="none" d="M6 6l10 6-10 6z" />
-            </svg>
-          )
-        case 'volume':
-          return (
-            <svg {...common}>
-              <path d="M11 5L7 9H4v6h3l4 4z" />
-              <path d="M15 9a4 4 0 0 1 0 6" />
-            </svg>
-          )
-        case 'muted':
-          return (
-            <svg {...common}>
-              <path d="M11 5L7 9H4v6h3l4 4z" />
-              <path d="M16 9l4 6" />
-              <path d="M20 9l-4 6" />
-            </svg>
-          )
-        case 'reset':
-          return (
-            <svg {...common}>
-              <path d="M21 2v6h-6" />
-              <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
-              <path d="M3 22v-6h6" />
-              <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
-            </svg>
-          )
-        case 'download':
-          return (
-            <svg {...common}>
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <path d="M7 10l5 5 5-5" />
-              <path d="M12 15V3" />
-            </svg>
-          )
-      }
-    }
-
-    const speedLabel = speed === 1 ? '1x' : `${speed}x`
-
-    const waveContentW = useMemo(() => {
-      if (!p.peaks || p.peaks.length === 0) return 0
-      return Math.max(1, p.peaks.length * WAVE_STEP - WAVE_GAP)
-    }, [p.peaks])
-
-    return (
-      <div className="wfPlayer">
-        <div
-          className="waveform wfWave"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          tabIndex={0}
-          onKeyDown={onKeyDown}
-          aria-label={`${p.label} waveform`}
-        >
-          <div
-            className="waveformScroll"
-            ref={scrollRef}
-            onScroll={onWaveScroll}
-            style={{ ['--wave-content-w' as any]: waveContentW ? `${waveContentW}px` : '100%' }}
-          >
-            <canvas ref={p.canvasRef as any} className="waveformCanvas waveformCanvasSticky" />
-          </div>
-          {(() => {
-            const overlay = p.overlayLabel ?? (p.isDecoding ? 'Rendering waveform' : p.src ? null : 'No audio')
-            if (!overlay) return null
-
-            return (
-              <div className="waveformOverlay muted small">
-                {overlay.startsWith('Generating') ? (
-                  <span className="wfOverlayRow">
-                    <span className="wfSpinner" aria-hidden={true} />
-                    <span>{overlay}</span>
-                  </span>
-                ) : (
-                  <span>{overlay}</span>
-                )}
-              </div>
-            )
-          })()}
-        </div>
-
-        <div className="wfTimes" aria-label="Time">
-          <span>{formatTime(currentTime)}</span>
-          <span>{formatTime(duration)}</span>
-        </div>
-
-        <div className="wfControls">
-          <div className="wfLeft">
-            <div className="wfVolumeWrap">
-              <button
-                type="button"
-                className="wfBtn"
-                onClick={() => setShowVolume((v) => !v)}
-                aria-label="Volume"
-                aria-expanded={showVolume}
-                title="Volume"
-              >
-                <Icon name={isMuted ? 'muted' : 'volume'} />
-              </button>
-              {showVolume ? (
-                <div className="wfVolumePopover" role="group" aria-label="Volume slider">
-                  <button type="button" className="wfVolMute" onClick={toggleMute} aria-label={isMuted ? 'Unmute' : 'Mute'}>
-                    <Icon name={isMuted ? 'muted' : 'volume'} />
-                  </button>
-                  <input
-                    className="wfVolRange"
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={isMuted ? 0 : volume}
-                    onChange={(e) => {
-                      const v = Number(e.target.value)
-                      setVolume(v)
-                      if (v > 0) setIsMuted(false)
-                    }}
-                    disabled={!p.src}
-                    aria-label="Volume"
-                  />
-                </div>
-              ) : null}
-            </div>
-
-            <button type="button" className="wfPill" onClick={cycleSpeed} disabled={!p.src} aria-label="Speed" title="Speed">
-              {speedLabel}
-            </button>
-          </div>
-
-          <div className="wfCenter">
-            <button type="button" className="wfBtn" onClick={() => skipBySeconds(-2)} disabled={!p.src} aria-label="Back 2 seconds" title="Back 2s">
-              <Icon name="skipBack" />
-            </button>
-            <button
-              type="button"
-              className="wfBtn wfBtnPrimary"
-              onClick={togglePlay}
-              disabled={!p.src}
-              aria-label={isPlaying ? 'Pause' : 'Play'}
-              aria-pressed={isPlaying}
-              title={isPlaying ? 'Pause' : 'Play'}
-            >
-              <Icon name={isPlaying ? 'pause' : 'play'} />
-            </button>
-            <button type="button" className="wfBtn" onClick={() => skipBySeconds(2)} disabled={!p.src} aria-label="Forward 2 seconds" title="Forward 2s">
-              <Icon name="skipFwd" />
-            </button>
-          </div>
-
-          <div className="wfRight">
-            {p.onSave ? (
-              <button
-                type="button"
-                className="wfBtn"
-                onClick={p.onSave}
-                disabled={!p.src || p.isSaving}
-                aria-label={p.isSaving ? 'Saving output audio' : 'Save output audio'}
-                title={p.isSaving ? 'Saving…' : 'Save'}
-              >
-                {p.isSaving ? <span className="wfSpinner" aria-hidden={true} /> : <Icon name="download" />}
-              </button>
-            ) : null}
-            {p.onClear ? (
-              <button type="button" className="wfBtn" onClick={p.onClear} aria-label="Clear" title="Clear">
-                <Icon name="reset" />
-              </button>
-            ) : null}
-          </div>
-        </div>
-
-        <audio ref={audioRef} className="audioEl" src={p.src ?? undefined} preload="metadata" />
-      </div>
-    )
   }
 
   return (
@@ -1026,6 +1027,7 @@ export function WorkspaceScreen(props: {
                     peaks={refWavePeaks}
                     canvasRef={refWaveCanvasRef}
                     isDecoding={isDecoding}
+                    waveRedrawTick={waveRedrawTick}
                     onClear={clearReferenceAudio}
                   />
                 )}
@@ -1152,6 +1154,7 @@ export function WorkspaceScreen(props: {
               peaks={outWavePeaks}
               canvasRef={outWaveCanvasRef}
               isDecoding={props.isGenerating || isOutDecoding}
+              waveRedrawTick={waveRedrawTick}
               overlayLabel={props.isGenerating ? `Generating ${formatTime(generatedSecForOverlay)}` : null}
               onSave={() => void onSaveOutput()}
               isSaving={isSavingOut}
