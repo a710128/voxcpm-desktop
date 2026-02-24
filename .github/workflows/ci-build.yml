@@ -257,10 +257,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          python tools/fetch_cuda_redist.py \
-            --cuda-minor 12.4 \
-            --platform windows-x86_64 \
-            --out-dir crates/voxcpm_desktop/src-tauri/resources/cuda/win-x64-cuda12.4 \
+          python tools/fetch_cuda_redist.py `
+            --cuda-minor 12.4 `
+            --platform windows-x86_64 `
+            --out-dir crates/voxcpm_desktop/src-tauri/resources/cuda/win-x64-cuda12.4 `
             --components cuda_cudart libcublas libcurand
 
       - name: Fetch CUDA redist libs (Linux CUDA 12.2)
