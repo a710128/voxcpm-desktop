@@ -7,6 +7,12 @@ import { Modal } from '../components/Modal'
 
 const DOWNLOAD_WEIGHT = 0.9
 
+type DownloadingPayload = Extract<DownloadEventPayload, { stage: 'downloading' }>
+
+function isDownloadingPayload(payload: DownloadEventPayload | null): payload is DownloadingPayload {
+  return payload?.stage === 'downloading'
+}
+
 function formatBytesPerSec(bps: number): string {
   if (!Number.isFinite(bps) || bps <= 0) return ''
   const units = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s']
@@ -31,10 +37,11 @@ export function ProgressScreen(props: {
   onBackToLaunch: () => void
   onRetry: () => void
 }) {
-  const isDownloading = props.download?.stage === 'downloading'
-  const filePercent = isDownloading ? props.download.percent : null
-  const downloadDone = isDownloading ? props.download.done : 0
-  const downloadTotal = isDownloading ? props.download.total : 0
+  const downloading = isDownloadingPayload(props.download) ? props.download : null
+  const isDownloading = downloading != null
+  const filePercent = downloading?.percent ?? null
+  const downloadDone = downloading?.done ?? 0
+  const downloadTotal = downloading?.total ?? 0
 
   // Overall download percent is computed by splitting the bar evenly by file count.
   // overall = ((done + filePercent/100) / total) * 100
@@ -56,14 +63,14 @@ export function ProgressScreen(props: {
   } | null>(null)
 
   useEffect(() => {
-    if (!isDownloading) {
+    if (!downloading) {
       speedSampleRef.current = null
       setSpeedBps(null)
       return
     }
 
-    const file = props.download.file
-    const bytesDownloaded = props.download.bytesDownloaded
+    const file = downloading.file
+    const bytesDownloaded = downloading.bytesDownloaded
     const tMs = performance.now()
     const last = speedSampleRef.current
 
@@ -87,7 +94,7 @@ export function ProgressScreen(props: {
 
     speedSampleRef.current = { file, bytesDownloaded, tMs, emaBps }
     setSpeedBps(emaBps)
-  }, [isDownloading, props.download?.file, props.download?.bytesDownloaded])
+  }, [downloading?.file, downloading?.bytesDownloaded])
 
   const phase: 'download' | 'load' | 'done' = (() => {
     const s = props.stage
@@ -182,11 +189,11 @@ export function ProgressScreen(props: {
                   />
                 ) : null}
               </div>
-              {props.download?.stage === 'downloading' ? (
-                <div className="muted small" title={props.download.file}>
-                  {props.download.file}
-                  {typeof props.download.done === 'number' && typeof props.download.total === 'number' && props.download.total > 0
-                    ? ` · ${props.download.done}/${props.download.total}`
+              {downloading ? (
+                <div className="muted small" title={downloading.file}>
+                  {downloading.file}
+                  {typeof downloading.done === 'number' && typeof downloading.total === 'number' && downloading.total > 0
+                    ? ` · ${downloading.done}/${downloading.total}`
                     : ''}
                   {speedBps != null ? ` · ${formatBytesPerSec(speedBps)}` : ''}
                 </div>

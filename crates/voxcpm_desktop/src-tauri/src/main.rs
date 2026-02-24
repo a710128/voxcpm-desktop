@@ -118,6 +118,9 @@ struct GenerateV1Params {
     reference_audio_path: Option<String>,
     #[serde(default)]
     reference_audio_bytes: Option<Vec<u8>>,
+    // New prompt-audio fields (preferred). Keep legacy reference_* for compatibility.
+    #[serde(default)]
+    prompt_audio_bytes: Option<Vec<u8>>,
     #[serde(default)]
     reference_text: Option<String>,
     cfg_value: f64,
@@ -256,7 +259,7 @@ async fn infer(window: tauri::WebviewWindow, params: InferParams) -> Result<Resp
     let seed = params.seed.unwrap_or_else(|| default_seed(job_id));
     let gen = st
         .engine
-        .generate(
+        .generate_with_prompt_audio(
             job_id,
             model.model_id,
             params.text,
@@ -443,16 +446,19 @@ async fn generate_v1(app: tauri::AppHandle, params: GenerateV1Params) -> Result<
         return Err("target_text is empty".to_string());
     }
 
-    let prompt_wav_bytes: Option<Vec<u8>> = match params.reference_audio_bytes {
+    let prompt_audio_bytes: Option<Vec<u8>> = match params.prompt_audio_bytes {
+        Some(b) if !b.is_empty() => Some(b),
+        _ => match params.reference_audio_bytes {
         Some(b) if !b.is_empty() => Some(b),
         _ => match normalize_opt_str(params.reference_audio_path) {
             None => None,
             Some(p) => Some(fs::read(p).map_err(|e| e.to_string())?),
         },
+        },
     };
     let prompt_text = normalize_opt_str(params.reference_text);
-    if prompt_wav_bytes.is_some() && prompt_text.is_none() {
-        return Err("reference_text is required when reference_audio_path is set".to_string());
+    if prompt_audio_bytes.is_some() && prompt_text.is_none() {
+        return Err("reference_text is required when prompt audio is set".to_string());
     }
 
     let job_id = next_job_id();
@@ -460,11 +466,11 @@ async fn generate_v1(app: tauri::AppHandle, params: GenerateV1Params) -> Result<
     let seed = params.seed.unwrap_or_else(|| default_seed(job_id));
     let gen = st
         .engine
-        .generate(
+        .generate_with_prompt_audio(
             job_id,
             prepared.model.model_id,
             target_text,
-            prompt_wav_bytes,
+            prompt_audio_bytes,
             prompt_text,
             seed,
             params.inference_steps,

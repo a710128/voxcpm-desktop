@@ -169,18 +169,127 @@ pub struct LoadModelResponse {
     pub sample_rate: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Generate request.
+///
+/// IPC wire format (bincode) is intentionally kept stable and only contains
+/// the fields needed by the engine today.
+#[derive(Debug, Clone)]
 pub struct GenerateRequest {
     pub job_id: JobId,
     pub model_id: String,
     pub text: String,
-    pub prompt_wav: Option<Vec<u8>>,
-    /// Reference text for prompt_wav (if provided).
+
+    /// Optional prompt audio bytes (previously called `prompt_wav`).
+    pub prompt_audio_bytes: Option<Vec<u8>>,
+
+    /// Reference text for prompt audio (if provided).
     pub prompt_text: Option<String>,
     pub seed: u64,
     pub max_steps: usize,
     pub guidance_scale: f64,
     pub emit_every_ms: u64,
+}
+
+// Stable IPC (bincode) representation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GenerateRequestWire {
+    job_id: JobId,
+    model_id: String,
+    text: String,
+    prompt_audio_bytes: Option<Vec<u8>>,
+    prompt_text: Option<String>,
+    seed: u64,
+    max_steps: usize,
+    guidance_scale: f64,
+    emit_every_ms: u64,
+}
+
+// Human-readable representation (JSON/etc). Supports legacy `prompt_wav`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GenerateRequestHuman {
+    job_id: JobId,
+    model_id: String,
+    text: String,
+
+    #[serde(default, alias = "prompt_wav")]
+    prompt_audio_bytes: Option<Vec<u8>>,
+
+    #[serde(default)]
+    prompt_text: Option<String>,
+    seed: u64,
+    max_steps: usize,
+    guidance_scale: f64,
+    emit_every_ms: u64,
+}
+
+impl serde::Serialize for GenerateRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            let h = GenerateRequestHuman {
+                job_id: self.job_id,
+                model_id: self.model_id.clone(),
+                text: self.text.clone(),
+                prompt_audio_bytes: self.prompt_audio_bytes.clone(),
+                prompt_text: self.prompt_text.clone(),
+                seed: self.seed,
+                max_steps: self.max_steps,
+                guidance_scale: self.guidance_scale,
+                emit_every_ms: self.emit_every_ms,
+            };
+            h.serialize(serializer)
+        } else {
+            let w = GenerateRequestWire {
+                job_id: self.job_id,
+                model_id: self.model_id.clone(),
+                text: self.text.clone(),
+                prompt_audio_bytes: self.prompt_audio_bytes.clone(),
+                prompt_text: self.prompt_text.clone(),
+                seed: self.seed,
+                max_steps: self.max_steps,
+                guidance_scale: self.guidance_scale,
+                emit_every_ms: self.emit_every_ms,
+            };
+            w.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for GenerateRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let h = GenerateRequestHuman::deserialize(deserializer)?;
+            Ok(Self {
+                job_id: h.job_id,
+                model_id: h.model_id,
+                text: h.text,
+                prompt_audio_bytes: h.prompt_audio_bytes,
+                prompt_text: h.prompt_text,
+                seed: h.seed,
+                max_steps: h.max_steps,
+                guidance_scale: h.guidance_scale,
+                emit_every_ms: h.emit_every_ms,
+            })
+        } else {
+            let w = GenerateRequestWire::deserialize(deserializer)?;
+            Ok(Self {
+                job_id: w.job_id,
+                model_id: w.model_id,
+                text: w.text,
+                prompt_audio_bytes: w.prompt_audio_bytes,
+                prompt_text: w.prompt_text,
+                seed: w.seed,
+                max_steps: w.max_steps,
+                guidance_scale: w.guidance_scale,
+                emit_every_ms: w.emit_every_ms,
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

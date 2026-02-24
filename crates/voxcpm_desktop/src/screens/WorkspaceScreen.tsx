@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
-import { save } from '@tauri-apps/plugin-dialog'
-import { writeFile } from '@tauri-apps/plugin-fs'
+import { open, save } from '@tauri-apps/plugin-dialog'
+import { readFile, writeFile } from '@tauri-apps/plugin-fs'
 
 import type { ProgressEventPayload } from '../types'
 
@@ -13,6 +13,36 @@ const WAVE_STEP = WAVE_BAR_W + WAVE_GAP
 const WAVE_BARS_PER_SEC = 20
 const WAVE_MIN_BARS = 24
 const WAVE_MAX_BARS = 20000
+
+const SUPPORTED_REF_AUDIO_EXTS = ['wav', 'flac', 'mp3', 'm4a', 'aac', 'mp4'] as const
+const SUPPORTED_REF_AUDIO_EXT_LIST = SUPPORTED_REF_AUDIO_EXTS.map((x) => `.${x}`).join(', ')
+const REFERENCE_AUDIO_ACCEPT = SUPPORTED_REF_AUDIO_EXTS.map((x) => `.${x}`).join(',')
+const SUPPORTED_REF_AUDIO_EXTS_DIALOG: string[] = [...SUPPORTED_REF_AUDIO_EXTS]
+
+function isSupportedRefAudioName(name: string): boolean {
+  const m = /\.([a-z0-9]+)$/i.exec(name.trim())
+  const ext = (m?.[1] ?? '').toLowerCase()
+  return (SUPPORTED_REF_AUDIO_EXTS as readonly string[]).includes(ext)
+}
+
+const SUPPORTED_REF_AUDIO_MIMES = new Set([
+  // wav
+  'audio/wav',
+  'audio/x-wav',
+  // flac
+  'audio/flac',
+  'audio/x-flac',
+  // mp3
+  'audio/mpeg',
+  // m4a/mp4 containers
+  'audio/mp4',
+  'audio/x-m4a',
+  // aac
+  'audio/aac',
+  'audio/x-aac',
+  // mp4 is often reported as video/* even when it's audio-only.
+  'video/mp4',
+])
 
 function drawWave(args: {
   canvas: HTMLCanvasElement | null
@@ -711,10 +741,16 @@ export function WorkspaceScreen(props: {
     return ref
   }
 
-  function isWavFile(f: File) {
-    const nameOk = f.name.toLowerCase().endsWith('.wav')
-    const typeOk = f.type === '' || f.type === 'audio/wav' || f.type === 'audio/x-wav'
-    return nameOk && typeOk
+  function isAudioFile(f: File) {
+    const name = f.name.toLowerCase()
+    const m = /\.([a-z0-9]+)$/.exec(name)
+    const ext = m?.[1] ?? ''
+    const extOk = (SUPPORTED_REF_AUDIO_EXTS as readonly string[]).includes(ext)
+
+    const type = (f.type || '').toLowerCase()
+    const typeOk = type === '' || SUPPORTED_REF_AUDIO_MIMES.has(type)
+
+    return extOk && typeOk
   }
 
   async function computeWavePeaks(arrayBuffer: ArrayBuffer): Promise<Float32Array> {
@@ -750,8 +786,8 @@ export function WorkspaceScreen(props: {
   }
 
   async function handlePickReferenceAudio(file: File) {
-    if (!isWavFile(file)) {
-      setRefAudioError('Only WAV files are supported right now.')
+    if (!isAudioFile(file)) {
+      setRefAudioError(`Unsupported reference audio. Supported extensions: ${SUPPORTED_REF_AUDIO_EXT_LIST}.`)
       return
     }
 
@@ -778,10 +814,40 @@ export function WorkspaceScreen(props: {
     } catch (e) {
       // Preview should be best-effort; keep playback even if waveform fails.
       setRefWavePeaks(null)
-      setRefAudioError(`Failed to render waveform: ${String(e)}`)
+      setRefAudioError(`Waveform preview failed (file still loaded): ${String(e)}`)
     } finally {
       setIsDecoding(false)
     }
+  }
+
+  async function handlePickReferenceAudioPath(path: string) {
+    // Native dialog already filters, but keep a cheap guard for safety.
+    const name = path.split('/').pop() ?? path
+    if (!isSupportedRefAudioName(name)) {
+      setRefAudioError(`Unsupported reference audio. Supported extensions: ${SUPPORTED_REF_AUDIO_EXT_LIST}.`)
+      return
+    }
+
+    setRefAudioError(null)
+    try {
+      const bytes = await readFile(path)
+      // Construct a File so we can reuse the existing preview + waveform path.
+      const f = new File([bytes], name)
+      await handlePickReferenceAudio(f)
+    } catch (e) {
+      setRefAudioError(`Failed to read reference audio: ${String(e)}`)
+    }
+  }
+
+  async function onSelectReferenceAudio() {
+    // Use Tauri native dialog so the picker can actually filter file types.
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: 'Audio', extensions: SUPPORTED_REF_AUDIO_EXTS_DIALOG }],
+    })
+    if (!picked) return
+    if (Array.isArray(picked)) return
+    await handlePickReferenceAudioPath(picked)
   }
 
   function clearReferenceAudio() {
@@ -953,14 +1019,14 @@ export function WorkspaceScreen(props: {
             </div>
             <div className="cardBody">
               <label className="label" htmlFor="referenceAudio">
-                Reference audio (WAV)
+                Reference audio
               </label>
               <input
                 id="referenceAudio"
                 ref={fileInputRef}
                 className="fileInputHidden"
                 type="file"
-                accept="audio/wav"
+                accept={REFERENCE_AUDIO_ACCEPT}
                 onChange={(e) => {
                   const f = e.target.files?.[0]
                   if (!f) return
@@ -981,13 +1047,20 @@ export function WorkspaceScreen(props: {
                 aria-label={props.referenceAudioName ? 'Reference waveform' : 'Upload reference audio'}
                 onClick={() => {
                   if (props.referenceAudioName) return
-                  fileInputRef.current?.click()
+                  void onSelectReferenceAudio().catch((e) => {
+                    // Fallback to the HTML file input if native dialog fails.
+                    console.error('[voxcpm] reference audio dialog failed', e)
+                    fileInputRef.current?.click()
+                  })
                 }}
                 onKeyDown={(e) => {
                   if (props.referenceAudioName) return
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault()
-                    fileInputRef.current?.click()
+                    void onSelectReferenceAudio().catch((err) => {
+                      console.error('[voxcpm] reference audio dialog failed', err)
+                      fileInputRef.current?.click()
+                    })
                   }
                 }}
                 onDragEnter={(e) => {
@@ -1017,7 +1090,9 @@ export function WorkspaceScreen(props: {
               >
                 {props.referenceAudioName == null ? (
                   <div>
-                    <div className="dropzoneTitle">{isDragging ? 'Drop to upload' : 'Drop a WAV here'}</div>
+                    <div className="dropzoneTitle">
+                      {isDragging ? 'Drop to upload' : 'Drop reference audio here'}
+                    </div>
                     <div className="dropzoneHint muted small">or click to select</div>
                   </div>
                 ) : (
@@ -1044,6 +1119,7 @@ export function WorkspaceScreen(props: {
                   ref={referenceTextRef}
                   className="input inputWrap"
                   rows={1}
+                  placeholder="transcript of reference audio ..."
                   value={props.referenceText}
                   onChange={(e) => props.onChangeReferenceText(e.target.value)}
                   onKeyDown={(e) => {
@@ -1144,7 +1220,7 @@ export function WorkspaceScreen(props: {
           <div className="cardHeader">
             <div>
               <div className="h2">Output</div>
-              <div className="muted">Audio + progress</div>
+              <div className="muted">Generated audio</div>
             </div>
           </div>
           <div className="cardBody">

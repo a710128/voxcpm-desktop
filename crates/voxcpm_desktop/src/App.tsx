@@ -268,6 +268,9 @@ export default function App() {
         params: {
           deviceSpec,
           targetText,
+          // New prompt-audio fields (preferred).
+          promptAudioBytes: referenceAudioBytes ? Array.from(referenceAudioBytes) : null,
+          // Legacy fields kept for backward compatibility with older backends.
           referenceAudioBytes: referenceAudioBytes ? Array.from(referenceAudioBytes) : null,
           referenceText: referenceText.trim() === '' ? null : referenceText,
           cfgValue,

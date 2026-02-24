@@ -344,7 +344,33 @@ impl EngineSdk {
         job_id: JobId,
         model_id: String,
         text: String,
-        prompt_wav: Option<Vec<u8>>,
+        prompt_audio_bytes: Option<Vec<u8>>,
+        prompt_text: Option<String>,
+        seed: u64,
+        max_steps: usize,
+        guidance_scale: f64,
+        emit_every_ms: u64,
+    ) -> Result<GenerateResult, SdkError> {
+        self.generate_with_prompt_audio(
+            job_id,
+            model_id,
+            text,
+            prompt_audio_bytes,
+            prompt_text,
+            seed,
+            max_steps,
+            guidance_scale,
+            emit_every_ms,
+        )
+        .await
+    }
+
+    pub async fn generate_with_prompt_audio(
+        &self,
+        job_id: JobId,
+        model_id: String,
+        text: String,
+        prompt_audio_bytes: Option<Vec<u8>>,
         prompt_text: Option<String>,
         seed: u64,
         max_steps: usize,
@@ -359,7 +385,7 @@ impl EngineSdk {
                     job_id,
                     model_id,
                     text,
-                    prompt_wav,
+                    prompt_audio_bytes,
                     prompt_text,
                     seed,
                     max_steps,

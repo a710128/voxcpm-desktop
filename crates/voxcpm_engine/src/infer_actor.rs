@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::audio::{decode_wav_mono_f32, encode_wav_f32_mono};
+use crate::audio::{decode_audio_mono_f32, encode_wav_f32_mono};
 use crate::ipc::OutTx;
 use crate::util::prod_usize;
 
@@ -292,9 +292,9 @@ impl ActorState {
 
         let result: ActorResult<GenerateResponse> = (|| {
             let prompt = req
-                .prompt_wav
+                .prompt_audio_bytes
                 .as_deref()
-                .map(decode_wav_mono_f32)
+                .map(decode_audio_mono_f32)
                 .transpose()
                 .map_err(|e| ActorError {
                     code: "infer_failed".to_string(),
