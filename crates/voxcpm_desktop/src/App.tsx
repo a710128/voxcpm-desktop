@@ -193,8 +193,11 @@ export default function App() {
   }, [mirror])
 
   useEffect(() => {
+    // Avoid persisting the initial fallback value (cpu) before boot-time
+    // capabilities probing chooses the real default device.
+    if (mode === 'boot') return
     setLaunchDeviceSpec(deviceSpec)
-  }, [deviceSpec])
+  }, [deviceSpec, mode])
 
   useEffect(() => {
     setLaunchModelSource(modelSource)
