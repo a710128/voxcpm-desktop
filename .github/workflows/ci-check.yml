@@ -15,13 +15,18 @@ jobs:
   check:
     name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # Some dependencies (e.g. ring) rely on Apple AArch64 baseline target features.
+      # Keep any target-specific flags localized to the matrix.
+      RUSTFLAGS: ${{ matrix.rustflags || '' }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-22.04
-          - windows-latest
-          - macos-14
+        include:
+          - os: ubuntu-22.04
+          - os: windows-latest
+          - os: macos-14
+            rustflags: '-C target-cpu=apple-m1'
 
     steps:
       - name: Checkout
