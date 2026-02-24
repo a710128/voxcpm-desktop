@@ -84,3 +84,29 @@ jobs:
 
       - name: Cargo check (voxcpm_engine_sdk + tauri-shell)
         run: cargo check -p voxcpm_engine_sdk --features tauri-shell
+
+  desktop-frontend:
+    name: desktop frontend (tsc + build)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: crates/voxcpm_desktop/package-lock.json
+
+      - name: Install deps
+        working-directory: crates/voxcpm_desktop
+        run: npm ci
+
+      - name: Typecheck (tsc)
+        working-directory: crates/voxcpm_desktop
+        run: npm exec -- tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters
+
+      - name: Build
+        working-directory: crates/voxcpm_desktop
+        run: npm run build
