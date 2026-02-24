@@ -499,14 +499,14 @@ mod tauri_sidecar {
                     let cuda_dir = resource_dir.join("cuda/linux-x64-cuda12.2");
                     let ld =
                         prepend_path_like(std::env::var_os("LD_LIBRARY_PATH"), &cuda_dir, ':');
-                    cmd.env("LD_LIBRARY_PATH", ld);
+                    cmd = cmd.env("LD_LIBRARY_PATH", ld);
                 }
 
                 #[cfg(target_os = "windows")]
                 {
                     let cuda_dir = resource_dir.join("cuda/win-x64-cuda12.4");
                     let path = prepend_path_like(std::env::var_os("PATH"), &cuda_dir, ';');
-                    cmd.env("PATH", path);
+                    cmd = cmd.env("PATH", path);
                 }
             }
 
