@@ -1012,7 +1012,7 @@ impl VoxCpmBuilder {
 
             // Metal: default to fp32 (ignore config.json dtype).
             if device.is_metal() {
-                DType::F32
+                DType::BF16
             } else {
                 config.dtype().unwrap_or(DType::BF16)
             }
